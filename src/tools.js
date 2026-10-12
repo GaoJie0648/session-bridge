@@ -77,16 +77,20 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, delive
     return `${shown.map(renderSession).join('\n')}${footer}`;
   };
 
-  const readSession = async ({ source, id, offset, limit = 30, maxChars = 2000 }) => {
+  const readSession = async ({ source, id, offset, limit = 30, maxChars = 2000, roles }) => {
     const session = await findSession(source, id);
-    const entries = await sources[source].read(session.file);
-    if (entries.length === 0) return `${sessionLabel(session)}\n這個 session 沒有對話內容。`;
+    const recorded = await sources[source].read(session.file);
+    if (recorded.length === 0) return `${sessionLabel(session)}\n這個 session 沒有對話內容。`;
+    const entries = roles ? recorded.filter((entry) => roles.includes(entry.role)) : recorded;
+    const wanted = roles?.join('、');
+    if (entries.length === 0) return `${sessionLabel(session)}\n共 ${recorded.length} 則，沒有 ${wanted} 的紀錄。`;
+    const picked = roles ? `，其中 ${wanted} 有 ${entries.length} 則` : '';
     const start = offset ?? Math.max(0, entries.length - limit);
     if (start >= entries.length) throw new Error(`offset ${start} 超出範圍，可用範圍為 0–${entries.length - 1}`);
     const page = entries.slice(start, start + limit);
     const earlier = start > 0 ? `；較早的內容請用 offset=${Math.max(0, start - limit)}` : '';
     const later = start + limit < entries.length ? `；較新的內容請用 offset=${start + limit}` : '';
-    const header = `${sessionLabel(session)} cwd=${session.cwd}\n共 ${entries.length} 則，顯示 [${start}]–[${page.at(-1).index}]${earlier}${later}`;
+    const header = `${sessionLabel(session)} cwd=${session.cwd}\n共 ${recorded.length} 則${picked}，顯示 [${start}]–[${page.at(-1).index}]${earlier}${later}`;
     return `${header}\n\n${page.map((entry) => renderEntry(entry, maxChars)).join('\n\n')}`;
   };
 
@@ -115,8 +119,13 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, delive
 
   const messaging = createMessaging({ mailbox, deliverToCodex, findSession });
 
-  const sendMessage = ({ from_source, from_id, to_source, to_id, text }) =>
-    messaging.send({ from: { source: from_source, id: from_id }, to: { source: to_source, id: to_id }, text });
+  const sendMessage = ({ from_source, from_id, to_source, to_id, text, expects_reply }) =>
+    messaging.send({
+      from: { source: from_source, id: from_id },
+      to: { source: to_source, id: to_id },
+      text,
+      expectsReply: expects_reply,
+    });
 
   const checkInbox = async ({ id }) => {
     const session = await findSession('claude', id);

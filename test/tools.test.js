@@ -47,6 +47,13 @@ describe('send_message and check_inbox', () => {
     assert.match(await tools.checkInbox({ id: CLAUDE_ID }), /沒有新訊息/);
   });
 
+  test('passes on that a message needs no reply', async () => {
+    const notice = { from_source: 'codex', from_id: CODEX_ID, to_source: 'claude', to_id: CLAUDE_ID };
+    await tools.sendMessage({ ...notice, text: '評語寫好了', expects_reply: false });
+
+    assert.match(await tools.checkInbox({ id: CLAUDE_ID }), /不需要回覆/);
+  });
+
   test('refuses an inbox id that is not a session id', async () => {
     await assert.rejects(tools.checkInbox({ id: '..\\..\\secrets' }), /找不到/);
   });
@@ -98,6 +105,29 @@ describe('read_session', () => {
     assert.match(output, /\[4\] .*assistant\n已修正 token 過期判斷。/);
     assert.doesNotMatch(output, /請修好登入的 bug/);
     assert.match(output, /共 5 則/);
+  });
+
+  test('shows only the requested roles while keeping the original indexes', async () => {
+    const output = await tools.readSession({ source: 'codex', id: CODEX_ID, roles: ['assistant'] });
+
+    assert.match(output, /\[1\] .*assistant\n我先看一下 auth 模組。/);
+    assert.match(output, /\[4\] .*assistant\n已修正 token 過期判斷。/);
+    assert.doesNotMatch(output, /\] .*(user|tool)\n/);
+    assert.match(output, /共 5 則，其中 assistant 有 2 則/);
+  });
+
+  test('pages within the requested roles', async () => {
+    const output = await tools.readSession({ source: 'codex', id: CODEX_ID, roles: ['assistant'], offset: 0, limit: 1 });
+
+    assert.match(output, /我先看一下 auth 模組。/);
+    assert.doesNotMatch(output, /已修正 token 過期判斷。/);
+    assert.match(output, /較新的內容請用 offset=1/);
+  });
+
+  test('says so when no entry has the requested role', async () => {
+    const output = await tools.readSession({ source: 'claude', id: CLAUDE_OTHER_ID, roles: ['tool'] });
+
+    assert.match(output, /沒有 tool 的紀錄/);
   });
 
   test('pages from the start when offset is given', async () => {

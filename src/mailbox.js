@@ -48,9 +48,10 @@ export const createMailbox = (root) => {
     return contents.map(parseJson).filter(Boolean);
   };
 
-  const add = async ({ from, to, text, auto = false }, state = 'new') => {
+  const add = async ({ from, to, text, auto = false, expectsReply = !auto }, state = 'new') => {
     const now = Date.now();
-    const message = { id: `${now}-${randomUUID().slice(0, 8)}`, from, to, text, auto, sentAt: new Date(now).toISOString() };
+    const id = `${now}-${randomUUID().slice(0, 8)}`;
+    const message = { id, from, to, text, auto, expectsReply, sentAt: new Date(now).toISOString() };
     const dir = stateDir(to, state);
     await fs.mkdir(dir, { recursive: true });
     const file = path.join(dir, fileName(message.id));

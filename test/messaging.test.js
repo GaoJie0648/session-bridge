@@ -109,7 +109,7 @@ describe('send_message safeguards', () => {
   test('keeps the incoming message open when the explicit reply cannot be delivered', async () => {
     await messaging.send({ from: CLAUDE, to: CODEX, text: '請修正' });
     await messaging.onPromptSubmit({ ...CODEX, prompt: queued[0].text });
-    await messaging.send({ from: CODEX, to: CLAUDE, text: '有個問題' });
+    await messaging.send({ from: CODEX, to: CLAUDE, text: '有個問題', expectsReply: true });
     await messaging.takeNew(CLAUDE);
     const active = await mailbox.list(CLAUDE, 'active');
     setup({
@@ -243,6 +243,60 @@ describe('automatic completion report', () => {
 
     assert.equal(queued.length, 1);
     assert.match(queued[0].text, /可以覆蓋。/);
+  });
+});
+
+describe('messages that need no reply', () => {
+  const handOver = async () => {
+    await messaging.send({ from: CLAUDE, to: CODEX, text: '請修正胸部配色' });
+    await messaging.onPromptSubmit({ ...CODEX, prompt: queued[0].text });
+  };
+
+  test('an answer to the message being handled does not come back as a report', async () => {
+    await handOver();
+    await messaging.send({ from: CODEX, to: CLAUDE, text: '收到，同意分工。' });
+    await messaging.takeNew(CLAUDE);
+
+    await messaging.onStop({ ...CLAUDE, lastMessage: '給使用者的狀態回報。' });
+
+    assert.equal(queued.length, 1);
+  });
+
+  test('an answer can still ask for a reply', async () => {
+    await handOver();
+    await messaging.send({ from: CODEX, to: CLAUDE, text: '要覆蓋舊檔嗎？', expectsReply: true });
+    await messaging.takeNew(CLAUDE);
+
+    await messaging.onStop({ ...CLAUDE, lastMessage: '可以覆蓋。' });
+
+    assert.match(queued[1].text, /可以覆蓋。/);
+  });
+
+  test('a notice sent to codex is not reported on when its turn ends', async () => {
+    await messaging.send({ from: CLAUDE, to: CODEX, text: '產圖還要二十分鐘。', expectsReply: false });
+    await messaging.onPromptSubmit({ ...CODEX, prompt: queued[0].text });
+
+    await messaging.onStop({ ...CODEX, lastMessage: '收到。' });
+
+    assert.equal((await messaging.takeNew(CLAUDE)).length, 0);
+  });
+
+  test('tells the recipient that no reply is wanted and the sender that none will come', async () => {
+    const output = await messaging.send({ from: CODEX, to: CLAUDE, text: '評語寫好了。', expectsReply: false });
+
+    const [message] = await messaging.takeNew(CLAUDE);
+
+    assert.match(message, /不需要回覆/);
+    assert.doesNotMatch(output, /回覆會自動送回/);
+  });
+
+  test('a message stored before the flag existed still gets its report', async () => {
+    await mailbox.add({ from: CODEX, to: CLAUDE, text: '舊版寄出的訊息' });
+    await messaging.takeNew(CLAUDE);
+
+    await messaging.onStop({ ...CLAUDE, lastMessage: '處理完了。' });
+
+    assert.match(queued[0].text, /處理完了。/);
   });
 });
 

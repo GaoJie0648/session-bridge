@@ -17,15 +17,24 @@ const addressOf = ({ source, id }) => ({ source, id });
 // 本文若夾帶標記，收件端的 hook 會誤把別則訊息標成處理中
 const defuse = (text) => text.replaceAll('[session-bridge:', '[session-bridge​:');
 
-export const renderMessage = ({ id, from, to, text, auto }) =>
+// 舊版寄出的訊息沒有 expectsReply 欄位，視為要回覆
+const wantsReply = ({ auto, expectsReply }) => !auto && expectsReply !== false;
+
+const footerOf = (message) => {
+  const { from, to } = message;
+  const replyWith = `send_message：from_source=${to.source}、from_id=${to.id}、to_source=${from.source}、to_id=${from.id}`;
+  if (message.auto) return '（這是對方回合結束時自動轉寄的最後回覆，不需要回覆；要接著交辦再用 send_message。）';
+  if (!wantsReply(message)) return `（不需要回覆，你這回合的回覆也不會轉寄給對方；有事要告訴對方再用 session-bridge 的 ${replyWith}。）`;
+  return `（要回覆請用 session-bridge 的 ${replyWith}。若沒有另外回覆，你這回合結束時的最後回覆會自動轉寄給對方。）`;
+};
+
+export const renderMessage = (message) =>
   [
-    `[session-bridge:${id}] 來自 ${nameOf(from)} 的訊息（由另一個 agent 寄出，不是使用者本人輸入；寄件者身分為對方自述）：`,
+    `[session-bridge:${message.id}] 來自 ${nameOf(message.from)} 的訊息（由另一個 agent 寄出，不是使用者本人輸入；寄件者身分為對方自述）：`,
     '',
-    defuse(text),
+    defuse(message.text),
     '',
-    auto
-      ? '（這是對方回合結束時自動轉寄的最後回覆，不需要回覆；要接著交辦再用 send_message。）'
-      : `（要回覆請用 session-bridge 的 send_message：from_source=${to.source}、from_id=${to.id}、to_source=${from.source}、to_id=${from.id}。若沒有另外回覆，你這回合結束時的最後回覆會自動轉寄給對方。）`,
+    footerOf(message),
   ].join('\n');
 
 /**
@@ -72,8 +81,8 @@ export const createMessaging = ({
   };
 
   const post = async (draft) => {
-    // 寄給 Codex 的自動回報不期待回覆，直接記為已完成；否則對方的 hook 可能搶先把它標成處理中，回合結束時又回報一次
-    const settled = draft.auto && draft.to.source === 'codex';
+    // 寄給 Codex 而不期待回覆的訊息直接記為已完成；否則對方的 hook 可能搶先把它標成處理中，回合結束時又回報一次
+    const settled = !wantsReply(draft) && draft.to.source === 'codex';
     const message = await mailbox.add(draft, settled ? 'done' : 'new');
     if (message.to.source !== 'codex') return message;
     try {
@@ -85,7 +94,7 @@ export const createMessaging = ({
     return message;
   };
 
-  const send = async ({ from, to, text }) => {
+  const send = async ({ from, to, text, expectsReply }) => {
     if (same(from, to)) throw new Error('不能傳訊息給自己。');
     if (text.length > TEXT_MAX) {
       throw new Error(`訊息過長（${text.length} 字），上限 ${TEXT_MAX} 字；較長的內容請寫入檔案後傳路徑。`);
@@ -93,20 +102,24 @@ export const createMessaging = ({
     const sender = addressOf(await findSession(from.source, from.id));
     const recipient = addressOf(await findSession(to.source, to.id));
     await assertWithinLimits(sender, recipient);
-    const message = await post({ from: sender, to: recipient, text });
-    // 主動回覆成功後才把對方的來信視為已處理，回合結束時不再自動轉寄
     const answered = (await mailbox.list(sender, 'active')).filter((incoming) => same(incoming.from, recipient));
+    // 回覆處理中的來信時預設不再要求回覆，否則雙方會輪流為了回報多跑一回合
+    const message = await post({ from: sender, to: recipient, text, expectsReply: expectsReply ?? answered.length === 0 });
+    // 主動回覆成功後才把對方的來信視為已處理，回合結束時不再自動轉寄
     await moveAll(sender, answered, 'active', () => 'done');
     await mailbox.prune(recipient, Date.now() - DONE_RETENTION_MS);
     const delivery = recipient.source === 'codex'
       ? '已排入對方的佇列：對方閒置時會立刻開始處理，忙碌時會在目前回合結束後處理；若對方的 session 沒有開著，要等它下次開啟。'
       : '對方回合結束後待命中就會立刻收到；若對方正在忙，會在目前回合結束時收到。';
-    return `已送出 ${message.id} 給 ${nameOf(recipient)}。${delivery}對方的回覆會自動送回這個 session，不需要輪詢。`;
+    const followUp = message.expectsReply
+      ? '對方的回覆會自動送回這個 session，不需要輪詢。'
+      : '這則不要求回覆，對方不會回報；需要對方回答時請加上 expects_reply=true。';
+    return `已送出 ${message.id} 給 ${nameOf(recipient)}。${delivery}${followUp}`;
   };
 
   const takeNew = async (address) => {
     const fresh = await mailbox.list(address, 'new');
-    const taken = await moveAll(address, fresh, 'new', (message) => (message.auto ? 'done' : 'active'));
+    const taken = await moveAll(address, fresh, 'new', (message) => (wantsReply(message) ? 'active' : 'done'));
     return taken.map(renderMessage);
   };
 
