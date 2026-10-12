@@ -1,0 +1,17 @@
+{
+  "name": "session-bridge",
+  "version": "0.1.0",
+  "description": "讓 Codex CLI 與 Claude Code 互相讀取 session 的 MCP server",
+  "main": "src/server.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/server.js"
+  },
+  "license": "ISC",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
+  }
+}
