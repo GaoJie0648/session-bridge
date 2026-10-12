@@ -4,7 +4,8 @@
   "description": "讓 Codex CLI 與 Claude Code 互相讀取 session 的 MCP server",
   "main": "src/server.js",
   "bin": {
-    "session-bridge": "src/server.js"
+    "session-bridge": "src/server.js",
+    "session-bridge-hook": "src/hook.js"
   },
   "scripts": {
     "test": "node --test",

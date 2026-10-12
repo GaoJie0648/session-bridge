@@ -1,16 +1,56 @@
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 
+import { createMailbox } from '../src/mailbox.js';
 import { createTools } from '../src/tools.js';
 import { CLAUDE_ID, CLAUDE_OTHER_ID, CODEX_ID, OTHER_CWD, PROJECT_CWD, createFixture } from './fixtures.js';
 
 let fixture;
 let tools;
+let queued = [];
 before(() => {
   fixture = createFixture();
-  tools = createTools({ codexRoot: fixture.codexRoot, claudeRoot: fixture.claudeRoot, defaultCwd: PROJECT_CWD });
+  tools = createTools({
+    codexRoot: fixture.codexRoot,
+    claudeRoot: fixture.claudeRoot,
+    defaultCwd: PROJECT_CWD,
+    mailbox: createMailbox(path.join(fixture.codexRoot, '..', 'mailbox')),
+    deliverToCodex: async (threadId, text) => {
+      queued = [...queued, { threadId, text }];
+    },
+  });
 });
 after(() => fixture.cleanup());
+
+describe('send_message and check_inbox', () => {
+  const claudeToCodex = { from_source: 'claude', from_id: CLAUDE_ID, to_source: 'codex', to_id: CODEX_ID };
+
+  test('delivers to an existing codex session and tells the sender what happens next', async () => {
+    const output = await tools.sendMessage({ ...claudeToCodex, text: '請接手登入修正' });
+
+    assert.equal(queued.at(-1).threadId, CODEX_ID);
+    assert.match(queued.at(-1).text, /請接手登入修正/);
+    assert.match(output, /已送出/);
+  });
+
+  test('refuses a sender that is not a session on this machine', async () => {
+    const forged = { ...claudeToCodex, from_id: '00000000-0000-0000-0000-000000000000' };
+
+    await assert.rejects(tools.sendMessage({ ...forged, text: 'hi' }), /找不到/);
+  });
+
+  test('hands a claude session its unread messages', async () => {
+    await tools.sendMessage({ from_source: 'codex', from_id: CODEX_ID, to_source: 'claude', to_id: CLAUDE_ID, text: '修好了，請驗收' });
+
+    assert.match(await tools.checkInbox({ id: CLAUDE_ID }), /修好了，請驗收/);
+    assert.match(await tools.checkInbox({ id: CLAUDE_ID }), /沒有新訊息/);
+  });
+
+  test('refuses an inbox id that is not a session id', async () => {
+    await assert.rejects(tools.checkInbox({ id: '..\\..\\secrets' }), /找不到/);
+  });
+});
 
 describe('list_sessions', () => {
   test('defaults to sessions of the current project from both tools, newest first', async () => {

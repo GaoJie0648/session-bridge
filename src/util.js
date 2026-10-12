@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 
+export const SESSION_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
 /**
  * 進行中的 session 最後一行可能尚未寫完，無法解析的行回傳 null 而不拋錯
  * @param {string} line
@@ -64,9 +66,14 @@ export const orElse = (fn, fallback) => async (...args) => {
   try {
     return await fn(...args);
   } catch (error) {
-    process.stderr.write(`[session-bridge] ${error instanceof Error ? error.message : String(error)}\n`);
+    logError(error);
     return fallback;
   }
+};
+
+/** @param {unknown} error */
+export const logError = (error) => {
+  process.stderr.write(`[session-bridge] ${error instanceof Error ? error.message : String(error)}\n`);
 };
 
 /** @param {string} dir */

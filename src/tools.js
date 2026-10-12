@@ -1,8 +1,8 @@
 import { listClaudeSessions, readClaudeEntries } from './claude.js';
 import { listCodexSessions, readCodexEntries } from './codex.js';
-import { isWithin, oneLine, orElse, truncate } from './util.js';
+import { createMessaging } from './messaging.js';
+import { SESSION_ID, isWithin, oneLine, orElse, truncate } from './util.js';
 
-const SESSION_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const DETAIL_MAX = 20000;
 const SNIPPET_RADIUS = 60;
 const HITS_PER_SESSION = 3;
@@ -36,9 +36,15 @@ const findHits = (session, entries, needle) =>
       `${session.source} ${session.id} [${entry.index}] ${entry.role}「${session.title}」\n  ${snippet(entry.text, position, needle.length)}`);
 
 /**
- * @param {{ codexRoot: string, claudeRoot: string, defaultCwd: string }} config
+ * @param {{
+ *   codexRoot: string,
+ *   claudeRoot: string,
+ *   defaultCwd: string,
+ *   mailbox?: ReturnType<typeof import('./mailbox.js').createMailbox>,
+ *   deliverToCodex?: (threadId: string, text: string) => Promise<void>,
+ * }} config mailbox 與 deliverToCodex 只有訊息工具會用到
  */
-export const createTools = ({ codexRoot, claudeRoot, defaultCwd }) => {
+export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, deliverToCodex }) => {
   const sources = {
     codex: { list: () => listCodexSessions(codexRoot), read: readCodexEntries },
     claude: { list: () => listClaudeSessions(claudeRoot), read: readClaudeEntries },
@@ -107,5 +113,16 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd }) => {
     return hits.slice(0, limit).join('\n');
   };
 
-  return { listSessions, readSession, getEntry, searchSessions };
+  const messaging = createMessaging({ mailbox, deliverToCodex, findSession });
+
+  const sendMessage = ({ from_source, from_id, to_source, to_id, text }) =>
+    messaging.send({ from: { source: from_source, id: from_id }, to: { source: to_source, id: to_id }, text });
+
+  const checkInbox = async ({ id }) => {
+    const session = await findSession('claude', id);
+    const messages = await messaging.takeNew({ source: 'claude', id: session.id });
+    return messages.length > 0 ? messages.join('\n\n---\n\n') : '沒有新訊息。';
+  };
+
+  return { listSessions, readSession, getEntry, searchSessions, sendMessage, checkInbox };
 };
