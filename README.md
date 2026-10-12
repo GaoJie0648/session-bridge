@@ -34,12 +34,11 @@
 需要 Node.js 22 以上。
 
 ```powershell
-git clone https://github.com/GaoJie0648/session-bridge.git "$HOME\Documents\dev\session-bridge"
-cd "$HOME\Documents\dev\session-bridge"
-npm install
-claude mcp add --scope user session-bridge -- node "$PWD\src\server.js"
-codex mcp add session-bridge -- node "$PWD\src\server.js"
+claude mcp add --scope user session-bridge -- cmd /c npx -y github:GaoJie0648/session-bridge
+codex mcp add session-bridge -- cmd /c npx -y github:GaoJie0648/session-bridge
 ```
+
+repo 為私有，該機器的 git 需先能存取（`gh auth login`）。macOS / Linux 去掉 `cmd /c`。
 
 只會讀取執行所在機器的 session，不會跨機器同步。
 

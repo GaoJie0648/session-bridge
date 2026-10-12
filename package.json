@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "讓 Codex CLI 與 Claude Code 互相讀取 session 的 MCP server",
   "main": "src/server.js",
+  "bin": {
+    "session-bridge": "src/server.js"
+  },
   "scripts": {
     "test": "node --test",
     "start": "node src/server.js"
