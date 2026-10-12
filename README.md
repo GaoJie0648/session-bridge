@@ -34,10 +34,14 @@
 需要 Node.js 22 以上。
 
 ```powershell
+git clone https://github.com/GaoJie0648/session-bridge.git "$HOME\Documents\dev\session-bridge"
+cd "$HOME\Documents\dev\session-bridge"
 npm install
-claude mcp add --scope user session-bridge -- node C:\Users\GaoJie\Documents\dev\session-bridge\src\server.js
-codex mcp add session-bridge -- node C:\Users\GaoJie\Documents\dev\session-bridge\src\server.js
+claude mcp add --scope user session-bridge -- node "$PWD\src\server.js"
+codex mcp add session-bridge -- node "$PWD\src\server.js"
 ```
+
+只會讀取執行所在機器的 session，不會跨機器同步。
 
 移除：`claude mcp remove session-bridge -s user`、`codex mcp remove session-bridge`。
 
