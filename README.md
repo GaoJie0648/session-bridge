@@ -40,6 +40,15 @@ codex mcp add session-bridge -- cmd /c npx -y github:GaoJie0648/session-bridge
 
 repo 為私有，該機器的 git 需先能存取（`gh auth login`）。macOS / Linux 去掉 `cmd /c`。
 
+以上指令以 PowerShell 為準。在 Git Bash 執行時 `/c` 會被自動轉成 `C:/`，導致 server 連不上，需在指令前加上 `MSYS_NO_PATHCONV=1`：
+
+```bash
+MSYS_NO_PATHCONV=1 claude mcp add --scope user session-bridge -- cmd /c npx -y github:GaoJie0648/session-bridge
+MSYS_NO_PATHCONV=1 codex mcp add session-bridge -- cmd /c npx -y github:GaoJie0648/session-bridge
+```
+
+安裝後可用 `claude mcp get session-bridge` 確認 Args 為 `/c npx ...` 且狀態為 Connected。
+
 只會讀取執行所在機器的 session，不會跨機器同步。
 
 移除：`claude mcp remove session-bridge -s user`、`codex mcp remove session-bridge`。
