@@ -54,6 +54,7 @@ const onStop = async ({ source, input, self, mailbox, messaging }) => {
 };
 
 const main = async () => {
+  if (process.env.SESSION_BRIDGE_MANAGED === '1') return 0;
   const source = process.argv[2];
   const input = await readStdin();
   if (!SOURCES.includes(source) || !SESSION_ID.test(input.session_id ?? '')) return 0;

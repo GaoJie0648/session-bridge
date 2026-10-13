@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { createCodexQueue } from './codex-queue.js';
 import { createMailbox, defaultMailboxRoot } from './mailbox.js';
 import { createTools } from './tools.js';
+import { createTaskTools } from './tasks.js';
 
 const tools = createTools({
   codexRoot: process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'),
@@ -34,7 +35,7 @@ const asResult = (handler) => async (args) => {
   }
 };
 
-const server = new McpServer({ name: 'session-bridge', version: '0.1.0' });
+const server = new McpServer({ name: 'session-bridge', version: '0.2.0' });
 const readOnly = { readOnlyHint: true, openWorldHint: false };
 
 server.registerTool('list_sessions', {
@@ -101,5 +102,35 @@ server.registerTool('check_inbox', {
   inputSchema: { id: sessionId('收件的 Claude Code ') },
   annotations: writesMailbox,
 }, asResult(tools.checkInbox));
+
+const tasks = createTaskTools();
+const jsonResult = (handler) => asResult(async (args) => JSON.stringify(await handler(args), null, 2));
+const taskId = z.string().uuid().describe('start_task 回傳的任務 id（不是 session id）');
+server.registerTool('start_task', {
+  description: '雙向交辦背景任務：Claude 可以啟動 Codex，Codex 也可以啟動 Claude；不需要目標 session 已經開著。只在使用者要求協作／交辦時使用。請提供完整目標、限制與驗收條件，並指定 cwd。工具立即回傳 task id；from_source/from_id 都提供時會自動回報。審批交由使用者執行 control 指令；agent 不得自行批准或開啟 automode。',
+  inputSchema: {
+    provider: source, cwd: z.string().max(1024).optional(), prompt: z.string().min(1).max(32000),
+    from_source: source.optional(), from_id: z.string().uuid().optional(),
+    auto_retry: z.boolean().optional().describe('已知重置時間或短暫限流時自動重試，最多 3 次；預設 true'),
+    fallback_provider: source.optional().describe('使用者已授權的另一個 provider；遇額度限制時最多自動轉交一次，預設不轉交'),
+  }, annotations: instructsAnotherAgent,
+}, jsonResult(tasks.start));
+server.registerTool('get_task', {
+  description: '查看背景任務進度、結果、額度暫停與待審批內容。control 欄位是給使用者在終端執行的入口，不是給 agent 自行同意。',
+  inputSchema: { id: taskId }, annotations: readOnly,
+}, jsonResult(tasks.get));
+server.registerTool('list_tasks', {
+  description: '列出 bridge 背景任務，預設目前專案。',
+  inputSchema: { cwd: z.string().max(1024).optional(), all: z.boolean().optional() }, annotations: readOnly,
+}, jsonResult(tasks.list));
+server.registerTool('resume_task', {
+  description: '恢復已停止／額度暫停的背景任務；可指定另一個 provider 接手。會帶入原任務和操作紀錄，接手者必須先檢查既有成果避免重複操作。僅在使用者授權範圍內使用。',
+  inputSchema: { id: taskId, provider: source.optional(), prompt: z.string().max(32000).optional() },
+  annotations: instructsAnotherAgent,
+}, jsonResult(tasks.resume));
+server.registerTool('cancel_task', {
+  description: '取消背景任務並撤銷此任務的 automode；cancelling 表示仍在停止，請等 cancelled 再接手。',
+  inputSchema: { id: taskId }, annotations: instructsAnotherAgent,
+}, jsonResult(tasks.cancel));
 
 await server.connect(new StdioServerTransport());
