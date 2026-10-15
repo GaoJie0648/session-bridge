@@ -6,7 +6,8 @@
   "bin": {
     "session-bridge": "src/server.js",
     "session-bridge-hook": "src/hook.js",
-    "session-bridge-control": "src/control.js"
+    "session-bridge-control": "src/control.js",
+    "session-bridge-statusline": "src/statusline.js"
   },
   "scripts": {
     "test": "node --test",

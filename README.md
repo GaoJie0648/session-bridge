@@ -1,6 +1,6 @@
 # session-bridge
 
-讓 Codex CLI 與 Claude Code 雙向讀取對話、互傳訊息、啟動背景協作任務的本機 MCP server。bridge 不直接修改 session 檔；背景 agent 透過各自的官方介面建立與恢復 session。訊息與任務另存於 `~/.session-bridge/`。
+讓 Codex CLI 與 Claude Code 雙向讀取對話、互傳訊息、啟動背景協作任務、在用量快到上限時提醒並交接的本機 MCP server。bridge 不直接修改 session 檔；背景 agent 透過各自的官方介面建立與恢復 session。訊息與任務另存於 `~/.session-bridge/`。
 
 ## 工具
 
@@ -148,23 +148,61 @@ Claude Code：在 `~/.claude/settings.json` 的 `hooks` 加入（路徑換成實
 ```json
 {
   "SessionStart": [{ "hooks": [{ "type": "command", "command": "node", "args": ["C:/path/to/session-bridge/src/hook.js", "claude"], "timeout": 15 }] }],
+  "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node", "args": ["C:/path/to/session-bridge/src/hook.js", "claude"], "timeout": 15 }] }],
+  "PostToolUse": [{ "hooks": [{ "type": "command", "command": "node", "args": ["C:/path/to/session-bridge/src/hook.js", "claude"], "timeout": 15 }] }],
   "Stop": [{ "hooks": [{ "type": "command", "command": "node", "args": ["C:/path/to/session-bridge/src/hook.js", "claude"], "asyncRewake": true, "timeout": 21700 }] }]
 }
 ```
 
-Codex CLI：建立 `~/.codex/hooks.json`，再到 Codex 內執行 `/hooks` 信任這三個 hook（未信任的 hook 不會執行）：
+用量提醒另需在同一個檔案的最上層加入 statusline（見[用量提醒](#用量提醒)）：
+
+```json
+{
+  "statusLine": { "type": "command", "command": "node C:/path/to/session-bridge/src/statusline.js" }
+}
+```
+
+Codex CLI：建立 `~/.codex/hooks.json`，再到 Codex 內執行 `/hooks` 信任這四個 hook（未信任的 hook 不會執行）：
 
 ```json
 {
   "hooks": {
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "node C:/path/to/session-bridge/src/hook.js codex", "timeout": 15 }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node C:/path/to/session-bridge/src/hook.js codex", "timeout": 15 }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "node C:/path/to/session-bridge/src/hook.js codex", "timeout": 15 }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "node C:/path/to/session-bridge/src/hook.js codex", "timeout": 60 }] }]
   }
 }
 ```
 
 沒有設定 hook 時 `send_message` 仍可把訊息送進 Codex，只是不會有自動回報，Claude 端也要自己呼叫 `check_inbox`。
+
+## 用量提醒
+
+互動 session 執行中，每次工具呼叫後與使用者送出訊息時都會檢查 5 小時與週用量，兩個時窗套用相同規則：
+
+| 用量 | agent 收到的提醒 | 桌面通知 |
+|------|------------------|----------|
+| ≥ 80% | 規劃收尾：完成手上的步驟，不開始大型新步驟，讓進度保持可交接 | 有 |
+| ≥ 90% | 立刻停在安全點，用 `send_message` 把工作交接給同專案最近有動靜的另一邊 session，然後停止並告知使用者 | 有 |
+
+- 同一 session、同一時窗、同一級別只提醒一次；時窗重置後重新計算。直接跳到 90% 時不會再補發 80% 的提醒。
+- 90% 時若同專案找不到另一邊的 session，或另一邊的用量也已達 90%，就不交接，改把交接內容寫在回覆裡，由使用者決定。
+- 桌面通知只在 Windows 送出，同一帳號同一級別只跳一次（多個 session 開著也一樣）。設 `SESSION_BRIDGE_NOTIFY=0` 可關閉。
+- 用量是帳號層級的。快照存在 `~/.session-bridge/usage/`，另一邊判斷能否接手時也會參考。
+
+資料來源：
+
+| 端 | 用量來源 | 需要的設定 |
+|----|----------|------------|
+| Codex CLI | rollout 檔每回合寫入的 `rate_limits` | `hooks.json` 的 `PostToolUse`、`UserPromptSubmit` |
+| Claude Code | 只有 statusline 的輸入有 `rate_limits`，hook 拿不到，所以由 `src/statusline.js` 存成快照再給 hook 讀；底部會顯示 `5h 42% · 7d 18%` | `statusLine` 與 `PostToolUse`、`UserPromptSubmit` hook |
+
+限制：
+
+- Claude Code 的 `rate_limits` 只提供給 Pro／Max 訂閱，且要在 session 第一次 API 回應之後才有。快照超過 10 分鐘沒更新時不採用。
+- 已經有自訂 statusline 時，要讓既有 script 也把輸入轉給 `src/statusline.js`，或把兩者的輸出合併。
+- 交接靠 agent 依提醒呼叫 `send_message`；如果額度在交接前就已用完，交接不會發生。
 
 ## 資料來源
 

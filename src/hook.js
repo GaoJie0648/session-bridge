@@ -1,9 +1,14 @@
 #!/usr/bin/env node
-import { readClaudeEntries } from './claude.js';
+import os from 'node:os';
+import path from 'node:path';
+
+import { listClaudeSessions, readClaudeEntries } from './claude.js';
+import { listCodexSessions } from './codex.js';
 import { createCodexQueue } from './codex-queue.js';
 import { SOURCES, createMailbox, defaultMailboxRoot } from './mailbox.js';
 import { createMessaging } from './messaging.js';
-import { SESSION_ID, orElse, parseJson } from './util.js';
+import { createUsageAlerts, createUsageStore, notifyDesktop, readCodexUsage } from './usage.js';
+import { SESSION_ID, isWithin, orElse, parseJson } from './util.js';
 import { waitForMessages } from './waiter.js';
 
 const POLL_MS = 2000;
@@ -33,6 +38,43 @@ const lastReply = async (source, input, mailbox, self) => {
   if ((await mailbox.list(self, 'active')).length === 0) return undefined;
   const entries = await orElse(readClaudeEntries, [])(input.transcript_path);
   return entries.findLast((entry) => entry.role === 'assistant')?.text;
+};
+
+const listSessions = {
+  codex: () => listCodexSessions(process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')),
+  claude: () => listClaudeSessions(path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects')),
+};
+
+// 交接對象：同專案中最近有動靜的另一邊 session
+const findPeer = (cwd) => async (self) => {
+  if (!cwd) return null;
+  const other = self.source === 'codex' ? 'claude' : 'codex';
+  const sessions = (await orElse(listSessions[other], [])()).filter((session) => isWithin(session.cwd, cwd));
+  return sessions.toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null;
+};
+
+// Claude Code 的用量由 statusline 寫入快照；Codex 直接從自己的 rollout 檔讀取，並存成快照給另一邊判斷能否交接
+const currentUsage = async (source, input, store) => {
+  if (source === 'claude') return store.loadSnapshot('claude');
+  if (!input.transcript_path) return [];
+  const windows = await readCodexUsage(input.transcript_path);
+  if (windows.length > 0) await store.saveSnapshot('codex', windows);
+  return windows;
+};
+
+/** 用量達門檻時回傳要注入給 agent 的 hook 輸出，否則回傳 undefined */
+const checkUsage = async ({ source, input, self }) => {
+  const store = createUsageStore(defaultMailboxRoot());
+  const alerts = createUsageAlerts({ store, findPeer: findPeer(input.cwd), notify: notifyDesktop });
+  const alert = await alerts.check(self, await currentUsage(source, input, store));
+  if (!alert) return undefined;
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: alert } });
+};
+
+// 用量提醒只是輔助，讀不到用量時不該影響原本的 hook
+const writeUsageAlert = async (args) => {
+  const output = await orElse(checkUsage, undefined)(args);
+  if (output) process.stdout.write(output);
 };
 
 const onStop = async ({ source, input, self, mailbox, messaging }) => {
@@ -70,6 +112,10 @@ const main = async () => {
       return 0;
     case 'UserPromptSubmit':
       await messaging.onPromptSubmit({ ...self, prompt: input.prompt });
+      await writeUsageAlert({ source, input, self });
+      return 0;
+    case 'PostToolUse':
+      await writeUsageAlert({ source, input, self });
       return 0;
     case 'Stop':
       return onStop({ source, input, self, mailbox, messaging });
