@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { createTaskStore, alive } from './task-store.js';
+import { createTaskStore, alive, PROVIDERS } from './task-store.js';
 
 const worker = fileURLToPath(new URL('./task-worker.js', import.meta.url));
 export const wakeWorker = async (store, id) => {
@@ -27,6 +27,17 @@ export const taskView = (task) => ({ ...task,
     cancel: `session-bridge-control cancel ${task.id}`,
   },
 });
+
+// 只列出還沒結束的任務；已完成、失敗、中斷、取消的不佔畫面
+const STATUS_LABELS = {
+  queued: '執行中', running: '執行中', cancelling: '執行中',
+  waiting_approval: '待審批', waiting_quota: '等額度', recovery_required: '需處理',
+};
+const LABEL_ORDER = [...new Set(Object.values(STATUS_LABELS))];
+export const formatTasks = (tasks) => PROVIDERS.flatMap((provider) => LABEL_ORDER.map((label) => {
+  const count = tasks.filter((task) => task.provider === provider && STATUS_LABELS[task.status] === label).length;
+  return count ? `${provider} ${label} ${count}` : null;
+})).filter(Boolean).join(' · ');
 
 export const createTaskTools = ({ store = createTaskStore(), wake = wakeWorker, defaultCwd = process.cwd() } = {}) => {
   const start = async ({ provider, cwd = defaultCwd, prompt, from_source, from_id, auto_retry = true, fallback_provider }) => {

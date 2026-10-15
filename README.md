@@ -47,6 +47,8 @@
 
 每個任務由獨立背景行程管理，關閉發起端 MCP 不會停止任務。Codex 使用 [app-server](https://learn.chatgpt.com/docs/app-server)；Claude 使用官方 [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) 與 `canUseTool` 回呼，預設使用 SDK 隨附的 CLI。沿用本機登入與原生設定；不切換 API key 或付費方式。可用 `SESSION_BRIDGE_CODEX` / `SESSION_BRIDGE_CLAUDE` 指定執行檔（Windows 請用 `.exe` 或 `.js`，不要 `.cmd`）。
 
+背景任務沒有視窗；設定了 Claude Code 的 statusline（見[用量提醒](#用量提醒)）時，底部會顯示還沒結束的任務，例如 `codex 執行中 1 · claude 待審批 1`（狀態依序為執行中、待審批、等額度、需處理），任務結束後就不再顯示。
+
 任務狀態：`queued` → `running`，執行中可能進入 `waiting_approval` 或 `waiting_quota`，最後為 `completed` / `failed` / `interrupted` / `cancelled`。`cancelling` 表示停止尚未完成；看到 `cancelled` 後再接手。無法確認原 agent 已停止時為 `recovery_required`，請檢查 `agentPid` 與行程，停止原行程後才能恢復。`get_task` 的 `workerAlive` 可辨認背景行程是否仍存在。非預期中斷後，使用 `resume_task` 恢復；舊審批不會沿用。
 
 兩個 agent 寫入同一個工作目錄時仍可能衝突；交辦時分開檔案範圍，或指定已建立的不同 worktree。bridge 只保證同一 task 不會同時啟動兩個 worker。
@@ -196,7 +198,7 @@ Codex CLI：建立 `~/.codex/hooks.json`，再到 Codex 內執行 `/hooks` 信�
 | 端 | 用量來源 | 需要的設定 |
 |----|----------|------------|
 | Codex CLI | rollout 檔每回合寫入的 `rate_limits` | `hooks.json` 的 `PostToolUse`、`UserPromptSubmit` |
-| Claude Code | 只有 statusline 的輸入有 `rate_limits`，hook 拿不到，所以由 `src/statusline.js` 存成快照再給 hook 讀；底部會顯示 `5h 42% · 7d 18%` | `statusLine` 與 `PostToolUse`、`UserPromptSubmit` hook |
+| Claude Code | 只有 statusline 的輸入有 `rate_limits`，hook 拿不到，所以由 `src/statusline.js` 存成快照再給 hook 讀；底部會顯示 `5h 42% · 7d 18%`，有背景任務時接著顯示 `codex 執行中 1` | `statusLine` 與 `PostToolUse`、`UserPromptSubmit` hook |
 
 限制：
 

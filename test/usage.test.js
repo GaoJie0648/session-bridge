@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 
+import { formatTasks } from '../src/tasks.js';
 import {
   createUsageAlerts,
   createUsageStore,
@@ -182,6 +183,25 @@ describe('statusline and hook', () => {
     assert.match(output.hookSpecificOutput.additionalContext, /5h 用量已達 83%/);
 
     assert.equal(run('hook.js', ['claude'], { session_id: CLAUDE.id, hook_event_name: 'PostToolUse', cwd: root }).stdout, '');
+  });
+
+  test('formats unfinished background tasks by provider and status', () => {
+    const tasks = ['running', 'queued', 'completed', 'waiting_approval', 'failed', 'cancelled'].map((status) => ({ provider: 'codex', status }));
+
+    assert.equal(formatTasks([...tasks, { provider: 'claude', status: 'waiting_quota' }]), 'codex 執行中 2 · codex 待審批 1 · claude 等額度 1');
+    assert.equal(formatTasks([{ provider: 'codex', status: 'completed' }]), '');
+    assert.equal(formatTasks([]), '');
+  });
+
+  test('the statusline shows running background tasks next to the usage', () => {
+    const id = '6bd6248b-81b8-4bf3-a60e-b2af76c45a70';
+    fs.mkdirSync(path.join(root, 'tasks', id), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tasks', id, 'task.json'), JSON.stringify({ id, provider: 'codex', status: 'running', createdAt: new Date().toISOString() }));
+
+    assert.equal(run('statusline.js', [], {}).stdout, 'codex 執行中 1');
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const status = run('statusline.js', [], { rate_limits: { seven_day: { used_percentage: 18, resets_at: resetsAt } } });
+    assert.equal(status.stdout, '7d 18% · codex 執行中 1');
   });
 
   test('the codex hook reads its own rollout', () => {
