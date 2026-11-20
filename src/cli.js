@@ -8,7 +8,6 @@ import { defaultHome, loadConfig, saveConfig } from './config.js';
 import { createMailbox } from './mailbox.js';
 import { createMessaging } from './messaging.js';
 import { createDefaultRegistry } from './providers/registry.js';
-import { runRoomCli } from './room-cli.js';
 import { createTaskStore } from './task-store.js';
 import { createTaskTools } from './tasks.js';
 import { detectWindowsTerminal } from './terminal.js';
@@ -24,16 +23,10 @@ const help = `session-bridge-cli — 跨工具前台終端協作管理工具
   show <task-id> [--json]              顯示單一任務詳細資訊與用量
   usage [--days 7] [--source all] [--json]
                                        查看近期各工具 token 用量摘要
-  prune [--tasks-days 14] [--messages-days 7] [--rooms-days N]
+  prune [--tasks-days 14] [--messages-days 7]
                                        清理過期任務、舊訊息與空信箱目錄
   wait <source> <session-id> [--timeout 3600]
                                        等待指定 session 收到新訊息後印出並結束（供背景喚醒用）
-  room create <title> [--cwd <path>]   建立本機群組房間
-  room add <room-id> <alias> <source> <session-id>
-                                       加入 agent 並產生成員權杖
-  room list [--json]                   列出本機房間
-  room watch <room-id> [--interactive] 在終端即時看房間，也可開啟互動發言
-  room serve <room-id> [--port N]       啟動本機瀏覽器看板
 `;
 
 const formatNumber = (n) => Number(n ?? 0).toLocaleString('en-US');
@@ -73,8 +66,7 @@ const renderUsage = (result) => {
   return `${lines.join('\n')}\n`;
 };
 
-export const runCli = async (argv = process.argv.slice(2),
-  { home = defaultHome(), env = process.env, output = process.stdout, input = process.stdin } = {}) => {
+export const runCli = async (argv = process.argv.slice(2), { home = defaultHome(), env = process.env } = {}) => {
   const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -91,10 +83,6 @@ export const runCli = async (argv = process.argv.slice(2),
       'messages-days': { type: 'string' },
       timeout: { type: 'string' },
       'poll-ms': { type: 'string' },
-      'rooms-days': { type: 'string' },
-      cwd: { type: 'string' },
-      port: { type: 'string' },
-      interactive: { type: 'boolean' },
     },
   });
 
@@ -102,7 +90,6 @@ export const runCli = async (argv = process.argv.slice(2),
   if (!action || values.help) return help;
 
   const registry = createDefaultRegistry({ home, env });
-  if (action === 'room') return runRoomCli({ args: positionals.slice(1), values, home, registry, output, input });
   const taskStore = createTaskStore(home);
   const taskTools = createTaskTools({ store: taskStore, registry });
   const usageTools = createUsageTools({ registry, taskStore });
@@ -188,11 +175,10 @@ export const runCli = async (argv = process.argv.slice(2),
       home,
       tasksDays: values['tasks-days'] ? Number(values['tasks-days']) : config.retention.tasksDays,
       doneMessagesDays: values['messages-days'] ? Number(values['messages-days']) : config.retention.doneMessagesDays,
-      roomsDays: values['rooms-days'] === undefined ? undefined : Number(values['rooms-days']),
     });
     return values.json
       ? `${JSON.stringify(stats, null, 2)}\n`
-      : `清理完成：移除任務 ${stats.tasksRemoved} 筆、過期訊息 ${stats.messagesRemoved} 則、空信箱目錄 ${stats.mailboxesRemoved} 個。${stats.roomsRemoved === undefined ? '' : `移除過期房間 ${stats.roomsRemoved} 間。`}\n`;
+      : `清理完成：移除任務 ${stats.tasksRemoved} 筆、過期訊息 ${stats.messagesRemoved} 則、空信箱目錄 ${stats.mailboxesRemoved} 個。\n`;
   }
 
   if (action === 'wait') {

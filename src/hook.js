@@ -6,7 +6,6 @@ import { createMailbox } from './mailbox.js';
 import { createMessaging } from './messaging.js';
 import { recordAgySessionMeta } from './providers/agy.js';
 import { createDefaultRegistry } from './providers/registry.js';
-import { createRooms } from './rooms.js';
 import { createTaskStore } from './task-store.js';
 import { orElse, parseJson, truncate } from './util.js';
 import { waitForMessages } from './waiter.js';
@@ -47,7 +46,6 @@ export const runHook = async ({
   mailbox = createMailbox(home),
   taskStore = createTaskStore(home),
   messaging = createMessaging({ mailbox, registry }),
-  rooms = createRooms({ home, registry }),
   isAbandoned = parentGone,
   sleep = () => new Promise((resolve) => setTimeout(resolve, POLL_MS)),
   maxPolls = MAX_WAIT_MS / POLL_MS,
@@ -61,7 +59,6 @@ export const runHook = async ({
 
   const self = { source, id: parsed.sessionId };
   const taskId = env.SESSION_BRIDGE_TASK_ID;
-  const takeRoom = () => orElse(rooms.take, [])(self);
 
   if (parsed.event === 'SessionStart') {
     if (source === 'agy' && parsed.cwd) {
@@ -76,13 +73,11 @@ export const runHook = async ({
       })();
     }
     const injectText = `session-bridge：這個 session 的位址是 ${source} ${self.id}。要傳訊息給其他 session 時，使用 send_message 並以此作為 from_source 與 from_id。`;
-    const roomMessages = source === 'codex' ? await takeRoom() : [];
-    return provider.formatHookOutput({ event: 'SessionStart', injectText: [injectText, ...roomMessages].join('\n\n') });
+    return provider.formatHookOutput({ event: 'SessionStart', injectText });
   }
 
   if (parsed.event === 'UserPromptSubmit') {
     await orElse(messaging.onPromptSubmit)({ ...self, prompt: parsed.prompt });
-    await orElse(rooms.acknowledge)({ ...self, prompt: parsed.prompt });
     return provider.formatHookOutput({ event: 'UserPromptSubmit' });
   }
 
@@ -90,7 +85,7 @@ export const runHook = async ({
     if (!provider.supportsSyncInboxCheck) {
       return provider.formatHookOutput({ event: 'PreInvocation' });
     }
-    const wakeMessages = [...await orElse(messaging.takeNew, [])(self), ...await takeRoom()];
+    const wakeMessages = await orElse(messaging.takeNew, [])(self);
     return provider.formatHookOutput({ event: 'PreInvocation', wakeMessages });
   }
 
@@ -135,16 +130,13 @@ export const runHook = async ({
     await orElse(messaging.onStop)({ ...self, lastMessage });
 
     if (!provider.supportsInboxWaiter) {
-      const wakeMessages = provider.supportsSyncInboxCheck
-        ? [...await orElse(messaging.takeNew, [])(self), ...await takeRoom()]
-        : [];
+      const wakeMessages = provider.supportsSyncInboxCheck ? await orElse(messaging.takeNew, [])(self) : [];
       return provider.formatHookOutput({ event: 'Stop', wakeMessages });
     }
     const wakeMessages = await waitForMessages({
       messaging,
       mailbox,
       address: self,
-      takeMore: takeRoom,
       isAbandoned,
       sleep,
       maxPolls,

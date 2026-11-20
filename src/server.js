@@ -6,8 +6,6 @@ import { z } from 'zod';
 import { EFFORT_LEVELS, TERMINAL_MODES, defaultHome } from './config.js';
 import { createMailbox } from './mailbox.js';
 import { createDefaultRegistry } from './providers/registry.js';
-import { attachmentContent } from './room-attachments.js';
-import { createRooms } from './rooms.js';
 import { createTaskStore } from './task-store.js';
 import { createTaskTools } from './tasks.js';
 import { createTools } from './tools.js';
@@ -16,11 +14,10 @@ import { createUsageTools } from './usage.js';
 const home = defaultHome();
 const registry = createDefaultRegistry({ home });
 const mailbox = createMailbox(home);
-const rooms = createRooms({ home, registry });
 const taskStore = createTaskStore(home);
 
 const tools = createTools({ registry, mailbox, defaultCwd: process.cwd() });
-const tasks = createTaskTools({ store: taskStore, registry, rooms, defaultCwd: process.cwd() });
+const tasks = createTaskTools({ store: taskStore, registry, defaultCwd: process.cwd() });
 const usage = createUsageTools({ registry, taskStore });
 
 const providerNames = registry.names;
@@ -113,63 +110,6 @@ server.registerTool('check_inbox', {
 }, asResult(tools.checkInbox));
 
 const taskId = z.string().uuid().describe('start_task 回傳的任務 id（不是 session id）');
-const roomId = z.string().uuid().describe('群組房間 ID');
-const roomCredentials = {
-  room_id: roomId,
-  room_token: z.string().regex(/^[a-f0-9]{48}$/).describe('房主交給這個 session 的成員權杖，請勿貼到房間或轉交'),
-};
-const seq = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
-const attachment = z.discriminatedUnion('kind', [
-  z.strictObject({
-    kind: z.literal('workspace_ref'),
-    path: z.string().min(1).max(4096).describe('房間工作目錄中的檔案，支援相對路徑'),
-    lines: z.strictObject({ start: seq, end: seq }).optional(),
-    note: z.string().max(1000).optional(),
-  }),
-  z.strictObject({
-    kind: z.literal('artifact'),
-    path: z.string().min(1).max(4096).describe('房間工作目錄中的檔案，會另外保存快照'),
-    name: z.string().min(1).max(256).optional(),
-  }),
-]);
-const asAgent = (token) => ({ agent: true, token });
-
-server.registerTool('room_read', {
-  description: '讀取群組房間的貼文、成員、附件與點名狀態。省略 since_seq 時回傳最近一頁。',
-  inputSchema: {
-    ...roomCredentials,
-    since_seq: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
-    limit: z.number().int().min(1).max(100).optional(),
-  },
-  annotations: readOnly,
-}, jsonResult(({ room_id, room_token, ...options }) => rooms.read(room_id, { ...options, ...asAgent(room_token) })));
-
-server.registerTool('room_post', {
-  description: '以你的房間成員身份貼文。正文的 @ 不觸發通知。接力點名時必須用 wake 列出成員別名，並以 reply_to_seq 指向點名給你的貼文。回覆結果通常只需貼文。',
-  inputSchema: {
-    ...roomCredentials,
-    text: z.string().max(8000).optional(),
-    wake: z.array(z.string().min(1).max(33)).max(32).optional(),
-    reply_to_seq: seq.optional(),
-    attachments: z.array(attachment).max(4).optional(),
-    client_message_id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/).optional()
-      .describe('重試同一則貼文時沿用此值'),
-  },
-  annotations: instructsAnotherAgent,
-}, jsonResult(({ room_id, room_token, ...draft }) => rooms.post(room_id, draft, asAgent(room_token))));
-
-server.registerTool('room_get_attachment', {
-  description: '以附件 ID 取回圖片或文字和本機路徑。二進位檔提供本機路徑，工作區參考讀取目前檔案內容。',
-  inputSchema: { ...roomCredentials, attachment_id: z.string().uuid() },
-  annotations: readOnly,
-}, ({ room_id, room_token, attachment_id }) => {
-  try {
-    return attachmentContent(rooms.attachment(room_id, attachment_id, asAgent(room_token)));
-  } catch (error) {
-    return { content: [{ type: 'text', text: error.message }], isError: true };
-  }
-});
-
 const effortSchema = z.enum(EFFORT_LEVELS).optional().describe(`推理強度（${EFFORT_LEVELS.join(' / ')}），省略時沿用工具預設`);
 const terminalModeSchema = z.enum(TERMINAL_MODES).optional().describe(`開啟終端的方式（${TERMINAL_MODES.join(' / ')}），省略時沿用 ~/.session-bridge/config.json`);
 
@@ -184,7 +124,6 @@ server.registerTool('start_task', {
     terminal_mode: terminalModeSchema,
     from_source: source.optional().describe('發起端工具，與 from_id 一起提供時會在完成後自動回報'),
     from_id: z.string().max(128).optional().describe('發起端 session id'),
-    room_id: roomId.optional().describe('帶入啟動提示的房間；由房主另行授予成員權限'),
   },
   annotations: instructsAnotherAgent,
 }, jsonResult(tasks.start));
@@ -198,7 +137,6 @@ server.registerTool('resume_task', {
     model: z.string().max(128).optional(),
     effort: effortSchema,
     terminal_mode: terminalModeSchema,
-    room_id: roomId.optional().describe('帶入啟動提示的房間；預設沿用先前房間'),
   },
   annotations: instructsAnotherAgent,
 }, jsonResult(tasks.resume));
