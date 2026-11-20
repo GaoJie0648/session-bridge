@@ -1,7 +1,7 @@
 {
   "name": "session-bridge",
   "version": "0.3.0",
-  "description": "讓 Claude Code、Codex CLI 與 Antigravity CLI 互通對話與前台獨立終端協作的本機 MCP server",
+  "description": "讓 Claude Code、Codex CLI 與 Antigravity CLI 互通對話和派發協作任務的本機 MCP server",
   "main": "src/server.js",
   "bin": {
     "session-bridge": "src/server.js",

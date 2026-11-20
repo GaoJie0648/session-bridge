@@ -193,6 +193,9 @@ export const createAgyProvider = ({
   listSessions: () => listAgySessions(root ?? defaultAgyRoot(env), home),
   readEntries: readAgyEntries,
   readUsage: readAgyUsage,
+  buildManagedSpec: () => ({
+    executable: resolveAgyCommand(env, platform), args: ['acp', '--stdio'], kind: 'acp',
+  }),
   buildLaunchSpec: ({ model, effort, resumeSessionId }) => {
     const args = [];
     if (resumeSessionId) args.push('--conversation', resumeSessionId);

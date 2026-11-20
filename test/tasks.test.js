@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 
 import { pruneStorage } from '../src/cleanup.js';
@@ -9,6 +11,8 @@ import { runCli } from '../src/cli.js';
 import { saveConfig } from '../src/config.js';
 import { runHook } from '../src/hook.js';
 import { createMailbox } from '../src/mailbox.js';
+import { openManagedRpc, UserActionRequired } from '../src/managed-rpc.js';
+import { launchManaged, runManagedTask } from '../src/managed-task.js';
 import { createMessaging } from '../src/messaging.js';
 import { createDefaultRegistry } from '../src/providers/registry.js';
 import { createTaskStore } from '../src/task-store.js';
@@ -116,6 +120,7 @@ describe('foreground task dispatch, model/effort, and hook lifecycle', () => {
         return { launcher: `wt:${opts.mode}`, pid: 1234 };
       },
     });
+    registry.get('claude').workspaceTrust = async () => false;
 
     const claudeTask = await tasks.start({
       provider: 'claude',
@@ -129,6 +134,8 @@ describe('foreground task dispatch, model/effort, and hook lifecycle', () => {
     assert.equal(claudeTask.model, 'claude-opus-4-6');
     assert.equal(claudeTask.effort, 'max');
     assert.equal(claudeTask.launcher, 'wt:split');
+    assert.equal(claudeTask.status, 'waiting_for_workspace_trust');
+    assert.match(claudeTask.startupHint, /Accessing workspace/);
     assert.deepEqual(launched[0].args, ['--model', 'claude-opus-4-6', '--effort', 'max']);
     assert.match(launched[0].prompt, /read_session\(source="agy"/);
 
@@ -148,6 +155,7 @@ describe('foreground task dispatch, model/effort, and hook lifecycle', () => {
       provider: 'agy',
       cwd: workdir,
       prompt: '整理架構',
+      execution_mode: 'terminal',
     });
     assert.equal(agyTask.provider, 'agy');
     assert.equal(launched[2].promptFlag, '-i');
@@ -159,7 +167,7 @@ describe('foreground task dispatch, model/effort, and hook lifecycle', () => {
     await runHook({
       source: 'claude',
       rawInput: { hook_event_name: 'SessionStart', session_id: CLAUDE_ID, cwd: workdir },
-      env: { ...process.env, SESSION_BRIDGE_TASK_ID: claudeTask.id },
+      env: { ...process.env, SESSION_BRIDGE_TASK_ID: claudeTask.id, SESSION_BRIDGE_TASK_RUN_ID: claudeTask.runId },
       home,
       registry,
       mailbox,
@@ -177,7 +185,7 @@ describe('foreground task dispatch, model/effort, and hook lifecycle', () => {
         transcript_path: fixture.claudeFile,
         last_assistant_message: 'auth 模組檢查完成，無異常。',
       },
-      env: { ...process.env, SESSION_BRIDGE_TASK_ID: claudeTask.id },
+      env: { ...process.env, SESSION_BRIDGE_TASK_ID: claudeTask.id, SESSION_BRIDGE_TASK_RUN_ID: claudeTask.runId },
       home,
       registry,
       mailbox,
@@ -201,6 +209,106 @@ describe('foreground task dispatch, model/effort, and hook lifecycle', () => {
     assert.ok(launched[3].args.includes('--resume'));
     assert.ok(launched[3].args.includes(CLAUDE_ID));
     assert.ok(launched[3].args.includes('low'));
+  });
+});
+
+describe('managed task lifecycle', () => {
+  for (const [provider, sessionId] of [['agy', AGY_ID], ['codex', CODEX_ID]]) {
+    test(`${provider} uses native session ID for cold start, completion and resume`, async () => {
+      const store = createTaskStore(home);
+      const registry = createDefaultRegistry({ home, env: {
+        ...process.env, SESSION_BRIDGE_CODEX: 'codex.exe', SESSION_BRIDGE_AGY: 'agy.exe',
+      } });
+      const requests = [];
+      const prompts = [];
+      const fakeRpc = () => {
+        let listener;
+        let completed;
+        return {
+          notify() {},
+          close() {},
+          onNotification(fn) { listener = fn; },
+          waitFor() { return new Promise((resolve) => { completed = resolve; }); },
+          async request(method, params) {
+            requests.push({ method, params });
+            if (method === 'initialize') return { protocolVersion: 1, agentCapabilities: { loadSession: true } };
+            if (method.startsWith('thread/')) return { thread: { id: sessionId } };
+            if (method === 'session/load' || method === 'session/new') return { sessionId };
+            const prompt = params.input?.[0]?.text ?? params.prompt?.[0]?.text;
+            prompts.push(prompt);
+            if (method === 'session/prompt') {
+              if (prompt === 'needs approval') throw new UserActionRequired('Native tool approval required');
+              listener('session/update', { sessionId, update: {
+                sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'finished' },
+              } });
+              return { stopReason: 'end_turn' };
+            }
+            queueMicrotask(() => {
+              listener('item/completed', { threadId: sessionId, item: { type: 'agentMessage', text: 'finished' } });
+              completed({ threadId: sessionId, turn: { id: 'turn-1', status: 'completed' } });
+            });
+            return { turn: { id: 'turn-1' } };
+          },
+        };
+      };
+      const tasks = createTaskTools({
+        store, registry, defaultCwd: workdir,
+        launcher: () => assert.fail('managed tasks must not open a terminal'),
+        managedLauncher: async (options) => {
+          await launchManaged({ ...options, spawnFn: (executable, args, launchOptions) => {
+            assert.equal(launchOptions.windowsHide, true);
+            assert.equal(launchOptions.detached, true);
+            const child = new EventEmitter();
+            child.unref = () => {};
+            queueMicrotask(() => child.emit('spawn'));
+            return child;
+          } });
+          await runManagedTask({ id: options.task.id, runId: options.task.runId, store, registry, connect: fakeRpc });
+        },
+      });
+
+      const first = await tasks.start({ provider, prompt: 'first', from_source: 'claude', from_id: CLAUDE_ID });
+      assert.equal(first.status, 'completed');
+      assert.equal(first.launcher, `managed:${provider}`);
+      assert.equal(first.sessions[provider], sessionId);
+      assert.equal(first.output, 'finished');
+      const second = await tasks.resume({ id: first.id, prompt: 'second' });
+      assert.equal(second.status, 'completed');
+      assert.equal(second.sessions[provider], sessionId);
+      assert.match(prompts[0], /first$/);
+      assert.equal(prompts[1], 'second');
+      const load = requests.find(({ method }) => ['thread/resume', 'session/load'].includes(method));
+      assert.equal(load.params.sessionId ?? load.params.threadId, sessionId);
+      const mailbox = createMailbox(home);
+      const reports = await mailbox.list({ source: 'claude', id: CLAUDE_ID }, 'new');
+      assert.equal(reports.length, 2);
+      assert.ok(reports.every(({ text }) => text.endsWith('finished')));
+      if (provider === 'agy') {
+        const blocked = await tasks.resume({ id: first.id, prompt: 'needs approval' });
+        assert.equal(blocked.status, 'needs_user_action');
+        assert.equal(blocked.sessions.agy, sessionId);
+        assert.match(blocked.error, /Native tool approval/);
+      }
+    });
+  }
+
+  test('cancels a native ACP approval request and signals that the user is required', async () => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const sent = [];
+    child.stdin.on('data', (data) => sent.push(JSON.parse(data)));
+    const rpc = openManagedRpc({ kind: 'acp' }, { spawnFn: () => child });
+    try {
+      const pending = rpc.request('session/prompt', {});
+      child.stdout.write('{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{}}\n');
+      await assert.rejects(pending, UserActionRequired);
+      assert.deepEqual(sent.at(-1), { jsonrpc: '2.0', id: 9, result: { outcome: { outcome: 'cancelled' } } });
+    } finally {
+      rpc.close();
+      child.emit('close', 0);
+    }
   });
 });
 

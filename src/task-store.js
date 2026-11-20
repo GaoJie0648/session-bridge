@@ -34,6 +34,7 @@ export const createTaskStore = (root = defaultHome()) => {
     model,
     effort,
     terminalMode,
+    executionMode,
     from,
     validProviders,
   }) => {
@@ -58,6 +59,7 @@ export const createTaskStore = (root = defaultHome()) => {
       model: model ?? null,
       effort: effort ?? null,
       terminalMode: terminalMode ?? 'tab',
+      ...(executionMode ? { executionMode } : {}),
       from: from ?? null,
       status: 'launched',
       sessions: {},
@@ -92,5 +94,20 @@ export const createTaskStore = (root = defaultHome()) => {
     return tasks.filter(Boolean).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   };
 
-  return { root, tasksRoot, dir, create, read, write, update, list };
+  const withLaunchLock = async (id, action) => {
+    const file = path.join(dir(id), 'launch.lock');
+    const lock = await fs.open(file, 'wx').catch((error) => {
+      if (error.code === 'EEXIST') throw new Error('這個任務正在安排啟動或續接，請稍後重試。');
+      if (error.code === 'ENOENT') throw new Error(`找不到任務：${id}`);
+      throw error;
+    });
+    try {
+      return await action();
+    } finally {
+      await lock.close();
+      await fs.unlink(file);
+    }
+  };
+
+  return { root, tasksRoot, dir, create, read, write, update, list, withLaunchLock };
 };

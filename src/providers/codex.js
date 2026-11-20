@@ -179,6 +179,10 @@ export const createCodexProvider = ({
   listSessions: () => listCodexSessions(root ?? defaultCodexRoot(env)),
   readEntries: readCodexEntries,
   readUsage: readCodexUsage,
+  buildManagedSpec: () => {
+    const [executable, ...prefix] = resolveCodexCommand(env, platform);
+    return { executable, args: [...prefix, 'app-server', '--listen', 'stdio://'], kind: 'codex' };
+  },
   buildLaunchSpec: ({ cwd, model, effort, resumeSessionId }) => {
     const [executable, ...prefix] = resolveCodexCommand(env, platform);
     const args = [...prefix];

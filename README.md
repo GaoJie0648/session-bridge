@@ -1,13 +1,13 @@
 # session-bridge
 
-讓 **Claude Code (`claude`)**、**Codex CLI (`codex`)** 與 **Antigravity CLI (`agy`)** 雙向讀取對話、互傳訊息、並透過前台獨立終端派發協作任務的本機 MCP server。
+讓 **Claude Code (`claude`)**、**Codex CLI (`codex`)** 與 **Antigravity CLI (`agy`)** 雙向讀取對話、互傳訊息並派發協作任務的本機 MCP server。
 
 所有狀態、信箱與設定另存於 `~/.session-bridge/`（可由 `SESSION_BRIDGE_HOME` 覆寫），不直接修改各工具的原始 session 檔案。
 
 ## 核心特性 (v0.3)
 
-- **前台獨立終端執行**：`start_task` / `resume_task` 優先透過 Windows Terminal (`wt.exe`) 開啟新分頁或分割視窗執行目標工具的原生互動式 CLI，直接看得到進度並於原生介面處理權限確認與提問；未安裝 `wt` 時退回獨立終端視窗。
-- **保留互動 + 自動回報**：目標 CLI 完成交辦回合後分頁維持開啟方便追問或接手，同時透過 `Stop` hook 自動將結果與 token 用量寫入任務並回報發起端。
+- **背景執行與續接**：Codex 預設使用 App Server，agy 預設使用 ACP。Bridge 記錄原生 session ID、回合結果與可取得的用量，並回報發起端。
+- **原生終端與權限確認**：Claude Code 預設使用前台終端。Codex 和 agy 也可以指定 `execution_mode: "terminal"`，在 Windows Terminal 處理登入、權限確認與提問。
 - **可插拔 Provider Adapter**：內建 `claude`、`codex`、`agy`，所有 session 讀取、啟動參數、用量解析與 hook 皆由 `src/providers/` 統一抽象。
 - **可驗證來源的跨 Session 通訊**：訊息與交辦附上來源 session 定位，指示接收端若需確認授權直接呼叫 `read_session(roles=["user"])` 查證原話後執行，避免 Claude 過度防禦反問使用者。
 - **調整 `model` 與 `effort`**：支援在 `start_task` / `resume_task` 或 `~/.session-bridge/config.json` 指定原生模型名稱與推理強度（`low` / `medium` / `high` / `xhigh` / `max`）。
@@ -23,10 +23,18 @@
 | `search_sessions` | 跨工具搜尋對話文字（不分大小寫，不含工具輸出） |
 | `send_message` | 傳訊息給另一個 session，並附上來源 session 查證指引 |
 | `check_inbox` | 取出指定 session 的未讀訊息 |
-| `start_task` | 在獨立終端開啟指定工具執行任務，支援 `model`、`effort`、`terminal_mode` 與完成自動回報 |
-| `resume_task` | 以原 provider（接續原生 session）或切換 provider 開啟新分頁繼續任務 |
+| `start_task` | 啟動協作任務，支援 `model`、`effort`、`execution_mode`、`terminal_mode` 與完成自動回報 |
+| `resume_task` | 續接原生 session，或切換 provider 繼續任務 |
 | `get_task` / `list_tasks` | 查看任務狀態、對應原生 session id、完成摘要與用量 |
 | `get_usage` | 查詢單一任務、單一 session，或近期各工具彙總的 token 用量與本機可得的 rate limit 快照 |
+
+### 執行方式與狀態
+
+- `execution_mode: "managed"` 需要支援 stdio App Server 的 Codex CLI，或支援 ACP v1 的 agy。agy 續接前會檢查 `loadSession` 能力。背景執行時，`get_task` 會顯示原生 session ID 和結果。
+- `execution_mode: "terminal"` 或明確指定 `terminal_mode` 會開啟原生終端。續接預設沿用上一次的執行方式，也可以切換。
+- Claude Code 請傳入專案的絕對 `cwd`。若任務顯示 `waiting_for_workspace_trust`，請在 Claude Code 終端確認專案。從家目錄啟動的信任確認只維持該次 session。
+- 若背景任務回傳 `needs_user_action`，可指定 `execution_mode: "terminal"` 續接，由使用者在原生介面處理登入或權限。`failed` 的 `error` 欄位會顯示啟動或回合錯誤。
+- `send_message` 可把訊息排入 agy 信箱。對閒置的 agy 任務，可用背景 `resume_task` 續接原對話並取信。
 
 ## 安裝與初始化
 

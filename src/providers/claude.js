@@ -11,6 +11,7 @@ import {
   UUID_PATTERN,
   atomicJson,
   findOnPath,
+  isWithin,
   label,
   oneLine,
   orElse,
@@ -199,6 +200,17 @@ export const createClaudeProvider = ({ root, env = process.env, platform = proce
   displayName: 'Claude Code',
   idPattern: UUID_PATTERN,
   supportsInboxWaiter: true,
+  workspaceTrust: async (cwd) => {
+    const userHome = os.homedir();
+    if (isWithin(cwd, userHome) && isWithin(userHome, cwd)) return false;
+    const configFile = env.CLAUDE_CONFIG_DIR
+      ? path.join(env.CLAUDE_CONFIG_DIR, '.claude.json')
+      : path.join(userHome, '.claude.json');
+    const config = await readJsonOr(configFile, null).catch(() => null);
+    const project = Object.entries(config?.projects ?? {}).find(([dir]) =>
+      isWithin(cwd, dir) && isWithin(dir, cwd));
+    return project?.[1]?.hasTrustDialogAccepted;
+  },
   listSessions: () => listClaudeSessions(root ?? defaultClaudeRoot(env)),
   readEntries: readClaudeEntries,
   readUsage: readClaudeUsage,

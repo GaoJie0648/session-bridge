@@ -4,6 +4,7 @@ import path from 'node:path';
 import { atomicJson, readJsonOr } from './util.js';
 
 export const TERMINAL_MODES = ['tab', 'split', 'window'];
+export const EXECUTION_MODES = ['managed', 'terminal'];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export const defaultHome = () => process.env.SESSION_BRIDGE_HOME ?? path.join(os.homedir(), '.session-bridge');

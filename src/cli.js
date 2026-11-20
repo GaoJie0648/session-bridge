@@ -160,6 +160,8 @@ export const runCli = async (argv = process.argv.slice(2), { home = defaultHome(
       `Usage:    ${task.usage ? JSON.stringify(task.usage) : '-'}`,
       `Output:\n${task.output || '(尚無回覆摘要)'}`,
     ];
+    if (task.startupHint) lines.push(task.startupHint);
+    if (task.error) lines.push(`問題：${task.error}`);
     return `${lines.join('\n')}\n`;
   }
 

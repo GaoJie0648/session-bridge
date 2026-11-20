@@ -59,6 +59,9 @@ export const runHook = async ({
 
   const self = { source, id: parsed.sessionId };
   const taskId = env.SESSION_BRIDGE_TASK_ID;
+  const runId = env.SESSION_BRIDGE_TASK_RUN_ID ?? null;
+  const matchesTask = (task) => task && task.provider === source && task.executionMode !== 'managed'
+    && (task.runId ?? null) === runId;
 
   if (parsed.event === 'SessionStart') {
     if (source === 'agy' && parsed.cwd) {
@@ -66,10 +69,14 @@ export const runHook = async ({
     }
     if (taskId) {
       await orElse(async () => {
-        await taskStore.update(taskId, (current) => ({
-          status: current.status === 'launched' ? 'running' : current.status,
-          sessions: { ...current.sessions, [source]: self.id },
-        }));
+        const task = await taskStore.read(taskId);
+        if (matchesTask(task)) {
+          await taskStore.update(taskId, (current) => ({
+            status: ['launched', 'waiting_for_workspace_trust'].includes(current.status) ? 'running' : current.status,
+            sessions: { ...current.sessions, [source]: self.id },
+            startupHint: null,
+          }));
+        }
       })();
     }
     const injectText = `session-bridge：這個 session 的位址是 ${source} ${self.id}。要傳訊息給其他 session 時，使用 send_message 並以此作為 from_source 與 from_id。`;
@@ -90,7 +97,8 @@ export const runHook = async ({
   }
 
   if (parsed.event === 'Stop') {
-    const task = taskId ? await orElse(taskStore.read, null)(taskId) : null;
+    const record = taskId ? await orElse(taskStore.read, null)(taskId) : null;
+    const task = matchesTask(record) ? record : null;
     const shouldReportTask = Boolean(task && !task.reportedAt);
     const lastMessage = await extractLastReply({
       provider,

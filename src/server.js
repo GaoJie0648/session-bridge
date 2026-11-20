@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { EFFORT_LEVELS, TERMINAL_MODES, defaultHome } from './config.js';
+import { EFFORT_LEVELS, EXECUTION_MODES, TERMINAL_MODES, defaultHome } from './config.js';
 import { createMailbox } from './mailbox.js';
 import { createDefaultRegistry } from './providers/registry.js';
 import { createTaskStore } from './task-store.js';
@@ -112,9 +112,10 @@ server.registerTool('check_inbox', {
 const taskId = z.string().uuid().describe('start_task 回傳的任務 id（不是 session id）');
 const effortSchema = z.enum(EFFORT_LEVELS).optional().describe(`推理強度（${EFFORT_LEVELS.join(' / ')}），省略時沿用工具預設`);
 const terminalModeSchema = z.enum(TERMINAL_MODES).optional().describe(`開啟終端的方式（${TERMINAL_MODES.join(' / ')}），省略時沿用 ~/.session-bridge/config.json`);
+const executionModeSchema = z.enum(EXECUTION_MODES).optional().describe('執行方式。Codex 和 agy 預設由 MCP 管理，Claude Code 使用前台終端；指定 terminal_mode 也會使用前台終端。');
 
 server.registerTool('start_task', {
-  description: `在前台獨立終端（Windows Terminal 分頁／分割視窗）開啟指定的 CLI（${providerNames.join(' / ')}）執行協作任務，讓使用者直接追蹤進度並在原生介面處理權限確認。任務完成該回合後終端維持互動，並透過 hook 自動記錄結果與回報發起端。`,
+  description: `啟動指定的 CLI（${providerNames.join(' / ')}）執行協作任務。Codex 和 agy 預設在背景執行，Claude Code 使用原生終端。用 get_task 查看 session、結果及待確認事項。`,
   inputSchema: {
     provider: source,
     cwd: z.string().max(1024).optional().describe('工作目錄的絕對路徑'),
@@ -122,6 +123,7 @@ server.registerTool('start_task', {
     model: z.string().max(128).optional().describe('指定該工具使用的模型名稱（如 claude-opus-4-6、sonnet、gpt-5.4），省略時使用預設'),
     effort: effortSchema,
     terminal_mode: terminalModeSchema,
+    execution_mode: executionModeSchema,
     from_source: source.optional().describe('發起端工具，與 from_id 一起提供時會在完成後自動回報'),
     from_id: z.string().max(128).optional().describe('發起端 session id'),
   },
@@ -129,7 +131,7 @@ server.registerTool('start_task', {
 }, jsonResult(tasks.start));
 
 server.registerTool('resume_task', {
-  description: '以原 provider（恢復原本的原生 session）或切換到另一個 provider 開啟新終端分頁繼續任務；可一併調整 model 或 effort。',
+  description: '以原 provider 恢復原本的 session，或切換 provider 繼續任務。可指定 execution_mode=terminal 以在原生終端處理權限或登入。',
   inputSchema: {
     id: taskId,
     provider: source.optional(),
@@ -137,6 +139,7 @@ server.registerTool('resume_task', {
     model: z.string().max(128).optional(),
     effort: effortSchema,
     terminal_mode: terminalModeSchema,
+    execution_mode: executionModeSchema,
   },
   annotations: instructsAnotherAgent,
 }, jsonResult(tasks.resume));
