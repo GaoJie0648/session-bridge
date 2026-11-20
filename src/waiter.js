@@ -4,16 +4,18 @@
  *   messaging: { takeNew: (address: object) => Promise<string[]> },
  *   mailbox: ReturnType<typeof import('./mailbox.js').createMailbox>,
  *   address: { source: string, id: string },
+ *   takeMore?: () => Promise<string[]>,
  *   isAbandoned: () => boolean,
  *   sleep: () => Promise<void>,
  *   maxPolls: number,
  * }} options
  */
-export const waitForMessages = async ({ messaging, mailbox, address, isAbandoned, sleep, maxPolls }) => {
+export const waitForMessages = async ({ messaging, mailbox, address, takeMore, isAbandoned, sleep, maxPolls }) => {
   const token = await mailbox.claimWaiter(address);
   for (let poll = 0; poll < maxPolls; poll += 1) {
     if (isAbandoned() || (await mailbox.waiterToken(address)) !== token) return [];
     const messages = await messaging.takeNew(address);
+    if (takeMore) messages.push(...await takeMore());
     if (messages.length > 0) return messages;
     await sleep();
   }

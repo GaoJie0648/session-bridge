@@ -3,14 +3,19 @@ import path from 'node:path';
 import { maybeAutoPrune } from './cleanup.js';
 import { TERMINAL_MODES, loadConfig, resolveProviderOptions } from './config.js';
 import { createDefaultRegistry } from './providers/registry.js';
+import { createRooms } from './rooms.js';
 import { createTaskStore } from './task-store.js';
 import { launchInTerminal } from './terminal.js';
+
+const roomPrompt = (roomId) =>
+  `[session-bridge 房間 ${roomId}] 若已取得房主提供的成員權杖，請用 room_read 查看房間，並用 room_post 明確貼回討論結果。`;
 
 /** 組合交辦給獨立終端 CLI 的初始 prompt（附上可驗證來源的查證指引） */
 export const buildTaskPrompt = (task, { isResume = false, extraPrompt } = {}) => {
   const lines = [
     `[session-bridge 任務 ${task.id}] 工作目錄：${task.cwd}`,
   ];
+  if (task.roomId) lines.push(roomPrompt(task.roomId));
   if (task.from) {
     lines.push(
       `交辦來源：${task.from.source} ${task.from.id}。如需核對是否為使用者本人授權或確認原話，請直接呼叫 session-bridge 的 read_session(source="${task.from.source}", id="${task.from.id}", roles=["user"]) 查證後直接執行，無需再詢問使用者。`,
@@ -29,6 +34,7 @@ export const buildTaskPrompt = (task, { isResume = false, extraPrompt } = {}) =>
 export const createTaskTools = ({
   store = createTaskStore(),
   registry = createDefaultRegistry({ home: store.root }),
+  rooms = createRooms({ home: store.root, registry }),
   launcher = launchInTerminal,
   defaultCwd = process.cwd(),
 } = {}) => {
@@ -75,6 +81,7 @@ export const createTaskTools = ({
     terminal_mode,
     from_source,
     from_id,
+    room_id,
   }) => {
     if (Boolean(from_source) !== Boolean(from_id)) {
       throw new Error('from_source 與 from_id 必須一起提供');
@@ -85,6 +92,7 @@ export const createTaskTools = ({
     const config = await loadConfig(store.root);
     const resolved = resolveProviderOptions(config, provider, { model, effort });
     const mode = terminal_mode ?? config.terminal.mode ?? 'tab';
+    const roomId = room_id ? rooms.info(room_id).id : undefined;
 
     const task = await store.create({
       provider,
@@ -93,6 +101,7 @@ export const createTaskTools = ({
       model: resolved.model,
       effort: resolved.effort,
       terminalMode: mode,
+      roomId,
       from: from_id ? { source: from_source, id: from_id } : undefined,
       validProviders: registry.names,
     });
@@ -107,7 +116,7 @@ export const createTaskTools = ({
     }
   };
 
-  const resume = async ({ id, provider, prompt, model, effort, terminal_mode }) => {
+  const resume = async ({ id, provider, prompt, model, effort, terminal_mode, room_id }) => {
     const existing = await store.read(id);
     const nextProvider = provider ?? existing.provider;
     if (!registry.has(nextProvider)) {
@@ -122,6 +131,8 @@ export const createTaskTools = ({
       effort: effort ?? (nextProvider === existing.provider ? existing.effort : undefined),
     });
     const resumeSessionId = existing.sessions?.[nextProvider];
+    const requestedRoom = room_id ?? existing.roomId;
+    const roomId = requestedRoom ? rooms.info(requestedRoom).id : undefined;
     const updated = await store.update(id, {
       provider: nextProvider,
       model: resolved.model ?? null,
@@ -129,10 +140,11 @@ export const createTaskTools = ({
       terminalMode: terminal_mode ?? existing.terminalMode ?? config.terminal.mode ?? 'tab',
       status: 'launched',
       reportedAt: null,
+      ...(roomId ? { roomId } : {}),
       ...(prompt?.trim() ? { prompt: `${existing.prompt}\n\n後續指示：${prompt.slice(0, 32000)}` } : {}),
     });
     const nextPrompt = resumeSessionId
-      ? (prompt?.trim() || '請接續先前未完成的工作。')
+      ? [roomId ? roomPrompt(roomId) : '', prompt?.trim() || '請接續先前未完成的工作。'].filter(Boolean).join('\n\n')
       : buildTaskPrompt(updated, { isResume: true, extraPrompt: prompt?.trim() });
     return launchTask(updated, { prompt: nextPrompt, resumeSessionId });
   };

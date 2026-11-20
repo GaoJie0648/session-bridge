@@ -34,6 +34,7 @@ export const createTaskStore = (root = defaultHome()) => {
     model,
     effort,
     terminalMode,
+    roomId,
     from,
     validProviders,
   }) => {
@@ -59,6 +60,7 @@ export const createTaskStore = (root = defaultHome()) => {
       effort: effort ?? null,
       terminalMode: terminalMode ?? 'tab',
       from: from ?? null,
+      ...(roomId ? { roomId } : {}),
       status: 'launched',
       sessions: {},
       launcher: null,

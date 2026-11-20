@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { defaultHome, loadConfig } from './config.js';
+import { createRooms } from './rooms.js';
 import { atomicJson, readJsonOr } from './util.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -22,8 +23,12 @@ export const pruneStorage = async ({
   home = defaultHome(),
   tasksDays = 14,
   doneMessagesDays = 7,
+  roomsDays,
   now = Date.now(),
 } = {}) => {
+  if (roomsDays !== undefined && (!Number.isSafeInteger(roomsDays) || roomsDays < 1)) {
+    throw new Error('房間保留天數須為正整數');
+  }
   const stats = { tasksRemoved: 0, messagesRemoved: 0, mailboxesRemoved: 0 };
   const taskCutoff = now - tasksDays * DAY_MS;
   const msgCutoff = now - doneMessagesDays * DAY_MS;
@@ -43,7 +48,7 @@ export const pruneStorage = async ({
   }
 
   // 2. 清理過期 done 訊息與只剩過期 waiter 的空信箱目錄
-  const reserved = new Set(['tasks', 'meta', 'config.json', 'cleanup-state.json']);
+  const reserved = new Set(['tasks', 'meta', 'rooms', 'config.json', 'cleanup-state.json']);
   for (const entry of await listEntries(home)) {
     if (!entry.isDirectory() || reserved.has(entry.name)) continue;
     const boxDir = path.join(home, entry.name);
@@ -72,6 +77,7 @@ export const pruneStorage = async ({
     }
   }
 
+  if (roomsDays !== undefined) stats.roomsRemoved = createRooms({ home }).prune(now - roomsDays * DAY_MS);
   return stats;
 };
 
