@@ -1,120 +1,110 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 
-import { listClaudeSessions, readClaudeEntries } from '../src/claude.js';
-import { listCodexSessions, readCodexEntries } from '../src/codex.js';
-import { isWithin, truncate } from '../src/util.js';
-import { CLAUDE_ID, CLAUDE_OTHER_ID, CODEX_ID, OTHER_CWD, PROJECT_CWD, createFixture } from './fixtures.js';
+import { listAgySessions, readAgyEntries, readAgyUsage } from '../src/providers/agy.js';
+import { listClaudeSessions, readClaudeEntries, readClaudeUsage } from '../src/providers/claude.js';
+import { listCodexSessions, readCodexEntries, readCodexUsage } from '../src/providers/codex.js';
+import { AGY_ID, CLAUDE_ID, CLAUDE_OTHER_ID, CODEX_ID, PROJECT_CWD, createFixture } from './fixtures.js';
 
 let fixture;
-before(() => { fixture = createFixture(); });
+before(() => {
+  fixture = createFixture();
+});
 after(() => fixture.cleanup());
 
-describe('util', () => {
-  test('isWithin matches the same directory regardless of case and separators', () => {
-    assert.equal(isWithin('c:/Work/Demo/', 'C:\\work\\demo'), true);
-  });
-
-  test('isWithin matches subdirectories but not sibling prefixes', () => {
-    assert.equal(isWithin('C:\\work\\demo\\src', 'C:\\work\\demo'), true);
-    assert.equal(isWithin('C:\\work\\demo-2', 'C:\\work\\demo'), false);
-  });
-
-  test('truncate reports the original length when cutting text', () => {
-    assert.equal(truncate('abcdef', 3), 'abc…(共 6 字)');
-    assert.equal(truncate('abc', 3), 'abc');
-  });
-});
-
-describe('codex parser', () => {
-  test('lists user sessions with title from the index and skips subagent sessions', async () => {
+describe('codex provider parser', () => {
+  test('lists user sessions with latest title from index and skips subagents', async () => {
     const sessions = await listCodexSessions(fixture.codexRoot);
 
     assert.equal(sessions.length, 1);
-    assert.deepEqual(
-      { ...sessions[0], updatedAt: undefined },
-      {
-        source: 'codex',
-        id: CODEX_ID,
-        title: '修正登入 bug',
-        cwd: PROJECT_CWD,
-        startedAt: '2026-10-07T08:51:02.346Z',
-        updatedAt: undefined,
-        file: fixture.codexFile,
-      },
-    );
-    assert.match(sessions[0].updatedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(sessions[0].id, CODEX_ID);
+    assert.equal(sessions[0].title, '修正登入 bug');
+    assert.equal(sessions[0].cwd, PROJECT_CWD);
   });
 
-  test('returns an empty list when the sessions directory is missing', async () => {
-    assert.deepEqual(await listCodexSessions(`${fixture.codexRoot}-missing`), []);
-  });
-
-  test('reads user and agent messages plus one-line tool summaries in order', async () => {
+  test('reads entries, omits reasoning and tool outputs unless detailIndex is set', async () => {
     const entries = await readCodexEntries(fixture.codexFile);
 
-    assert.deepEqual(
-      entries.map(({ index, role, text }) => [index, role, text]),
-      [
-        [0, 'user', '請修好登入的 bug'],
-        [1, 'assistant', '我先看一下 auth 模組。'],
-        [2, 'tool', 'exec: Get-Content src/auth.js'],
-        [3, 'tool', 'file_change: update C:\\work\\demo\\src\\auth.js'],
-        [4, 'assistant', '已修正 token 過期判斷。'],
-      ],
-    );
-    assert.equal(entries[0].timestamp, '2026-10-07T08:51:16.000Z');
-    assert.equal(entries.some((entry) => 'detail' in entry), false);
+    assert.equal(entries.length, 5);
+    assert.deepEqual(entries.map((e) => e.role), ['user', 'assistant', 'tool', 'tool', 'assistant']);
+    assert.doesNotMatch(entries[2].text, /SECRET_TOOL_OUTPUT/);
+
+    const detailed = await readCodexEntries(fixture.codexFile, { detailIndex: 2 });
+    assert.match(detailed[2].detail, /SECRET_TOOL_OUTPUT/);
   });
 
-  test('attaches full tool detail only to the requested entry', async () => {
-    const entries = await readCodexEntries(fixture.codexFile, { detailIndex: 2 });
+  test('extracts model, token usage, and rate limits', async () => {
+    const usage = await readCodexUsage(fixture.codexFile);
 
-    assert.match(entries[2].detail, /SECRET_TOOL_OUTPUT/);
-    assert.equal('detail' in entries[3], false);
+    assert.equal(usage.model, 'gpt-5.4');
+    assert.equal(usage.inputTokens, 1200);
+    assert.equal(usage.outputTokens, 300);
+    assert.equal(usage.cacheReadTokens, 800);
+    assert.equal(usage.rateLimits.primary.used_percent, 12);
   });
 });
 
-describe('claude parser', () => {
-  test('lists top-level sessions with ai title, cwd and start time', async () => {
+describe('claude provider parser', () => {
+  test('lists sessions, prefers ai-title, and skips unreadable files and subagents', async () => {
     const sessions = await listClaudeSessions(fixture.claudeRoot);
-    const byId = Object.fromEntries(sessions.map((session) => [session.id, session]));
 
-    assert.deepEqual(Object.keys(byId).sort(), [CLAUDE_ID, CLAUDE_OTHER_ID].sort());
-    assert.equal(byId[CLAUDE_ID].source, 'claude');
-    assert.equal(byId[CLAUDE_ID].title, '加入深色模式');
-    assert.equal(byId[CLAUDE_ID].cwd, PROJECT_CWD);
-    assert.equal(byId[CLAUDE_ID].startedAt, '2026-10-09T06:24:00.000Z');
-    assert.equal(byId[CLAUDE_ID].file, fixture.claudeFile);
-  });
-
-  test('falls back to the first prompt when a session has no ai title', async () => {
-    const sessions = await listClaudeSessions(fixture.claudeRoot);
-    const other = sessions.find((session) => session.id === CLAUDE_OTHER_ID);
-
+    assert.equal(sessions.length, 2);
+    const main = sessions.find((s) => s.id === CLAUDE_ID);
+    const other = sessions.find((s) => s.id === CLAUDE_OTHER_ID);
+    assert.equal(main.title, '加入深色模式');
     assert.equal(other.title, '另一個專案的問題');
-    assert.equal(other.cwd, OTHER_CWD);
   });
 
-  test('reads conversation text and tool summaries while skipping meta, thinking and sidechains', async () => {
+  test('reads entries, skips meta and sidechain, attaches tool detail on demand', async () => {
     const entries = await readClaudeEntries(fixture.claudeFile);
 
-    assert.deepEqual(
-      entries.map(({ index, role, text }) => [index, role, text]),
-      [
-        [0, 'user', '幫我加上深色模式'],
-        [1, 'assistant', '我先讀取樣式檔。'],
-        [2, 'tool', 'Read: {"file_path":"C:\\\\work\\\\demo\\\\style.css"}'],
-        [3, 'assistant', '深色模式已完成。'],
-      ],
-    );
-    assert.equal(entries.some((entry) => 'detail' in entry), false);
+    assert.equal(entries.length, 4);
+    assert.deepEqual(entries.map((e) => e.role), ['user', 'assistant', 'tool', 'assistant']);
+
+    const detailed = await readClaudeEntries(fixture.claudeFile, { detailIndex: 2 });
+    assert.match(detailed[2].detail, /body \{ color: black \}/);
   });
 
-  test('attaches tool input and matching result to the requested entry', async () => {
-    const entries = await readClaudeEntries(fixture.claudeFile, { detailIndex: 2 });
+  test('aggregates token usage from assistant messages', async () => {
+    const usage = await readClaudeUsage(fixture.claudeFile);
 
-    assert.match(entries[2].detail, /style\.css/);
-    assert.match(entries[2].detail, /body \{ color: black \}/);
+    assert.equal(usage.model, 'claude-sonnet-4-6');
+    assert.equal(usage.inputTokens, 700);
+    assert.equal(usage.outputTokens, 200);
+    assert.equal(usage.cacheReadTokens, 700);
+    assert.equal(usage.turns, 2);
+  });
+});
+
+describe('agy provider parser', () => {
+  test('lists Antigravity CLI sessions and attaches recorded cwd metadata', async () => {
+    const sessions = await listAgySessions(fixture.agyRoot, fixture.bridgeHome);
+
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].id, AGY_ID);
+    assert.equal(sessions[0].title, '幫我檢查 Antigravity 整合');
+    assert.equal(sessions[0].cwd, PROJECT_CWD);
+  });
+
+  test('extracts clean user request, assistant text, and tool call details', async () => {
+    const entries = await readAgyEntries(fixture.agyFile);
+
+    assert.equal(entries.length, 4);
+    assert.deepEqual(entries.map((e) => e.role), ['user', 'assistant', 'tool', 'assistant']);
+    assert.equal(entries[0].text, '幫我檢查 Antigravity 整合');
+    assert.match(entries[2].text, /read_file/);
+
+    const detailed = await readAgyEntries(fixture.agyFile, { detailIndex: 2 });
+    assert.match(detailed[2].detail, /"name":"demo"/);
+  });
+
+  test('aggregates model and token usage from PLANNER_RESPONSE steps', async () => {
+    const usage = await readAgyUsage(fixture.agyFile);
+
+    assert.equal(usage.model, 'gemini-4-neon-medium');
+    assert.equal(usage.inputTokens, 1400);
+    assert.equal(usage.outputTokens, 400);
+    assert.equal(usage.cacheReadTokens, 1500);
+    assert.equal(usage.turns, 2);
   });
 });

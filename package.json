@@ -1,12 +1,13 @@
 {
   "name": "session-bridge",
-  "version": "0.2.0",
-  "description": "讓 Codex CLI 與 Claude Code 互相讀取 session 的 MCP server",
+  "version": "0.3.0",
+  "description": "讓 Claude Code、Codex CLI 與 Antigravity CLI 互通對話與前台獨立終端協作的本機 MCP server",
   "main": "src/server.js",
   "bin": {
     "session-bridge": "src/server.js",
     "session-bridge-hook": "src/hook.js",
-    "session-bridge-control": "src/control.js"
+    "session-bridge-cli": "src/cli.js",
+    "session-bridge-control": "src/cli.js"
   },
   "scripts": {
     "test": "node --test",
@@ -16,7 +17,6 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.296",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "zod": "^4.6.5"
   }

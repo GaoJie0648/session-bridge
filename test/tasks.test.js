@@ -2,275 +2,310 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { afterEach, beforeEach, test } from 'node:test';
+import { afterEach, beforeEach, describe, test } from 'node:test';
+
+import { pruneStorage } from '../src/cleanup.js';
+import { runCli } from '../src/cli.js';
+import { saveConfig } from '../src/config.js';
+import { runHook } from '../src/hook.js';
+import { createMailbox } from '../src/mailbox.js';
+import { createMessaging } from '../src/messaging.js';
+import { createDefaultRegistry } from '../src/providers/registry.js';
 import { createTaskStore } from '../src/task-store.js';
-import { createTaskRunner, limitInfo } from '../src/task-runner.js';
 import { createTaskTools } from '../src/tasks.js';
-import { createApprovals, autoAllows } from '../src/approvals.js';
+import { buildLauncherScript, buildTerminalCommand } from '../src/terminal.js';
+import { createUsageTools } from '../src/usage.js';
+import { AGY_ID, CLAUDE_ID, CODEX_ID, createFixture } from './fixtures.js';
 
-let root;
-let store;
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-tasks-')); store = createTaskStore(root); });
-afterEach(async () => { await fs.rm(root, { recursive: true, force: true }); });
-const make = (options = {}) => store.create({ provider: 'codex', cwd: root, prompt: '修改文件並驗證', ...options });
-const until = async (check) => {
-  for (let n = 0; n < 200; n += 1) { if (check()) return; await sleep(10); }
-  throw new Error('test condition timed out');
-};
+let fixture;
+let home;
+let workdir;
 
-test('starts either provider without an existing target session', async () => {
-  const woken = [];
-  const tools = createTaskTools({ store, defaultCwd: root, wake: async (_, id) => woken.push(id) });
-  for (const provider of ['codex', 'claude']) {
-    const task = await tools.start({ provider, prompt: 'hello' });
-    assert.equal(task.status, 'queued');
-    assert.deepEqual(task.sessions, {});
-    assert.equal((await store.read(task.id)).provider, provider);
-  }
-  assert.equal(woken.length, 2);
-  assert.equal((await tools.list()).length, 2);
+beforeEach(async () => {
+  fixture = createFixture();
+  home = fixture.bridgeHome;
+  workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'session-bridge-cwd-'));
 });
 
-test('validates task input and path traversal', async () => {
-  await assert.rejects(make({ provider: 'other' }), /provider/);
-  await assert.rejects(make({ fallback: 'codex' }), /fallback/);
-  await assert.rejects(make({ cwd: '..' }), /cwd/);
-  await assert.rejects(make({ prompt: '' }), /任務/);
-  assert.throws(() => store.dir('../secrets'), /task id/);
+afterEach(async () => {
+  fixture.cleanup();
+  await fs.rm(workdir, { recursive: true, force: true });
 });
 
-test('only one worker can claim a task, and releasing allows the next one', async () => {
-  const task = await make();
-  const claims = await Promise.all(Array.from({ length: 10 }, () => store.claim(task.id)));
-  assert.equal(claims.filter(Boolean).length, 1);
-  await claims.find(Boolean)();
-  const next = await store.claim(task.id);
-  assert.ok(next);
-  await next();
-});
+describe('terminal launcher commands', () => {
+  test('uses Windows Terminal tab, split, and window modes when wt is available', () => {
+    const base = { scriptPath: 'C:\\tmp\\launch.ps1', cwd: 'C:\\work', title: 'bridge:claude', wtPath: 'C:\\wt.exe', shellPath: 'pwsh.exe', platform: 'win32' };
 
-for (const provider of ['codex', 'claude']) {
-  test(`${provider}: persists progress, awaits approval and completes with a report`, async () => {
-    const task = await make({ provider });
-    const reports = [];
-    const runner = createTaskRunner({ task, store, notify: async (_, text) => reports.push(text), drivers: {
-      [provider]: async (_, context) => {
-        await context.event({ type: 'session', id: '11111111-1111-4111-8111-111111111111' });
-        await context.event({ type: 'text', text: '已讀取檔案' });
-        const response = await context.approve({ kind: 'command', details: { command: 'npm test' } });
-        assert.equal(response.decision, 'approve');
-        return { status: 'completed', output: '完成' };
-      },
-    } });
-    runner.launch();
-    await until(() => task.status === 'waiting_approval');
-    await runner.save();
-    assert.equal((await store.read(task.id)).output, '已讀取檔案');
-    const id = task.approvals[0].id;
-    await runner.handle({ action: 'approve', approvalId: id });
-    await runner.settled();
-    assert.equal(task.status, 'completed');
-    assert.equal(task.output, '完成');
-    assert.ok(reports.some((text) => text.includes('任務完成')));
-    assert.match(await fs.readFile(path.join(store.dir(task.id), 'events.jsonl'), 'utf8'), /已讀取檔案/);
-    await assert.rejects(runner.handle({ action: 'approve', approvalId: id }), /已結束/);
+    const tab = buildTerminalCommand({ ...base, mode: 'tab' });
+    assert.equal(tab.launcher, 'wt:tab');
+    assert.deepEqual(tab.args.slice(0, 3), ['-w', '0', 'new-tab']);
+
+    const split = buildTerminalCommand({ ...base, mode: 'split', splitDirection: 'vertical' });
+    assert.equal(split.launcher, 'wt:split');
+    assert.ok(split.args.includes('split-pane'));
+    assert.ok(split.args.includes('-V'));
+
+    const win = buildTerminalCommand({ ...base, mode: 'window' });
+    assert.equal(win.launcher, 'wt:window');
+    assert.equal(win.args[0], 'new-tab');
   });
 
-  test(`${provider}: automode handles current and later requests then clears on completion`, async () => {
-    const task = await make({ provider });
-    const runner = createTaskRunner({ task, store, drivers: {
-      [provider]: async (_, context) => {
-        assert.equal((await context.approve({ kind: 'file', details: {} })).decision, 'approve');
-        assert.equal((await context.approve({ kind: 'command', details: {} })).decision, 'approve');
-        return { status: 'completed' };
-      },
-    } });
-    runner.launch();
-    await until(() => task.status === 'waiting_approval');
-    await runner.handle({ action: 'auto', enabled: true, minutes: 10 });
-    await runner.settled();
-    assert.equal(task.status, 'completed');
-    assert.equal(task.automode, null);
-    assert.deepEqual(task.approvals.map((approval) => approval.actor), ['automode', 'automode']);
+  test('falls back to cmd start when wt is not installed on Windows', () => {
+    const spec = buildTerminalCommand({
+      scriptPath: 'C:\\tmp\\launch.ps1',
+      cwd: 'C:\\work',
+      title: 'bridge:codex',
+      wtPath: null,
+      shellPath: 'powershell.exe',
+      platform: 'win32',
+    });
+
+    assert.equal(spec.launcher, 'cmd:start');
+    assert.equal(spec.command, 'cmd.exe');
+    assert.ok(spec.args.includes('start'));
   });
 
-  test(`${provider}: cancel revokes approval, stops the run and prevents stale approvals`, async () => {
-    const task = await make({ provider });
-    const runner = createTaskRunner({ task, store, drivers: {
-      [provider]: async (_, context) => {
-        const result = await context.approve({ kind: 'command', details: {} }, context.signal);
-        assert.equal(result.decision, 'deny');
-        return { status: 'completed' };
+  test('generates PowerShell script that reads prompt from UTF-8 file and passes promptFlag', () => {
+    const script = buildLauncherScript({
+      executable: 'agy.exe',
+      args: ['--model', 'gemini-4-neon', '--effort', 'high'],
+      promptFile: 'C:\\tmp\\prompt.txt',
+      promptFlag: '-i',
+      env: { SESSION_BRIDGE_TASK_ID: 'task-1' },
+      title: "bridge:agy 'quoted'",
+    });
+
+    assert.match(script, /\$env:SESSION_BRIDGE_TASK_ID = 'task-1'/);
+    assert.match(script, /\$__args \+= '-i'/);
+    assert.match(script, /ReadAllText\('C:\\tmp\\prompt\.txt'/);
+    assert.match(script, /'bridge:agy ''quoted'''/);
+  });
+});
+
+describe('foreground task dispatch, model/effort, and hook lifecycle', () => {
+  test('dispatches tasks with model/effort overrides and config defaults across all 3 providers', async () => {
+    await saveConfig({
+      terminal: { mode: 'split', splitDirection: 'horizontal' },
+      defaults: {
+        claude: { model: 'claude-sonnet-4-6', effort: 'medium' },
+        codex: { model: 'gpt-5.4', effort: 'high' },
+        agy: { model: 'gemini-4-neon', effort: 'high' },
       },
-    } });
-    runner.launch();
-    await until(() => task.status === 'waiting_approval');
-    await runner.handle({ action: 'cancel' });
-    await runner.settled();
-    assert.equal(task.status, 'cancelled');
-    assert.equal(task.automode, null);
-    await assert.rejects(runner.handle({ action: 'approve', approvalId: task.approvals[0].id }), /已結束/);
+    }, home);
+
+    const launched = [];
+    const store = createTaskStore(home);
+    const registry = createDefaultRegistry({
+      codexRoot: fixture.codexRoot,
+      claudeRoot: fixture.claudeRoot,
+      agyRoot: fixture.agyRoot,
+      home,
+      env: {
+        ...process.env,
+        SESSION_BRIDGE_CLAUDE: 'claude.exe',
+        SESSION_BRIDGE_CODEX: 'codex.exe',
+        SESSION_BRIDGE_AGY: 'agy.exe',
+      },
+    });
+    const tasks = createTaskTools({
+      store,
+      registry,
+      defaultCwd: workdir,
+      launcher: async (opts) => {
+        launched.push(opts);
+        return { launcher: `wt:${opts.mode}`, pid: 1234 };
+      },
+    });
+
+    const claudeTask = await tasks.start({
+      provider: 'claude',
+      cwd: workdir,
+      prompt: '檢查 auth 模組',
+      model: 'claude-opus-4-6',
+      effort: 'max',
+      from_source: 'agy',
+      from_id: AGY_ID,
+    });
+    assert.equal(claudeTask.model, 'claude-opus-4-6');
+    assert.equal(claudeTask.effort, 'max');
+    assert.equal(claudeTask.launcher, 'wt:split');
+    assert.deepEqual(launched[0].args, ['--model', 'claude-opus-4-6', '--effort', 'max']);
+    assert.match(launched[0].prompt, /read_session\(source="agy"/);
+
+    const codexTask = await tasks.start({
+      provider: 'codex',
+      cwd: workdir,
+      prompt: '補上測試',
+      terminal_mode: 'tab',
+    });
+    assert.equal(codexTask.model, 'gpt-5.4');
+    assert.equal(codexTask.effort, 'high');
+    assert.ok(launched[1].args.includes('-m'));
+    assert.ok(launched[1].args.includes('gpt-5.4'));
+    assert.ok(launched[1].args.includes('model_reasoning_effort="high"'));
+
+    const agyTask = await tasks.start({
+      provider: 'agy',
+      cwd: workdir,
+      prompt: '整理架構',
+    });
+    assert.equal(agyTask.provider, 'agy');
+    assert.equal(launched[2].promptFlag, '-i');
+    assert.deepEqual(launched[2].args, ['--model', 'gemini-4-neon', '--effort', 'high']);
+
+    // 模擬目標終端觸發 SessionStart 與 Stop hook，回寫 session、結果、用量並通知發起端
+    const mailbox = createMailbox(home);
+    const messaging = createMessaging({ mailbox, registry });
+    await runHook({
+      source: 'claude',
+      rawInput: { hook_event_name: 'SessionStart', session_id: CLAUDE_ID, cwd: workdir },
+      env: { ...process.env, SESSION_BRIDGE_TASK_ID: claudeTask.id },
+      home,
+      registry,
+      mailbox,
+      taskStore: store,
+      messaging,
+    });
+    assert.equal((await store.read(claudeTask.id)).status, 'running');
+    assert.equal((await store.read(claudeTask.id)).sessions.claude, CLAUDE_ID);
+
+    await runHook({
+      source: 'claude',
+      rawInput: {
+        hook_event_name: 'Stop',
+        session_id: CLAUDE_ID,
+        transcript_path: fixture.claudeFile,
+        last_assistant_message: 'auth 模組檢查完成，無異常。',
+      },
+      env: { ...process.env, SESSION_BRIDGE_TASK_ID: claudeTask.id },
+      home,
+      registry,
+      mailbox,
+      taskStore: store,
+      messaging,
+      isAbandoned: () => true,
+    });
+
+    const finished = await store.read(claudeTask.id);
+    assert.equal(finished.status, 'completed');
+    assert.match(finished.output, /auth 模組檢查完成/);
+    assert.equal(finished.usage.inputTokens, 700);
+
+    // 發起端 agy 信箱應收到自動完成回報
+    const reports = await messaging.takeNew({ source: 'agy', id: AGY_ID });
+    assert.equal(reports.length, 1);
+    assert.match(reports[0], /auth 模組檢查完成/);
+
+    // 測試 resume_task（沿用原原生 session id 並調整 effort）
+    await tasks.resume({ id: claudeTask.id, effort: 'low', prompt: '補跑一次 lint' });
+    assert.ok(launched[3].args.includes('--resume'));
+    assert.ok(launched[3].args.includes(CLAUDE_ID));
+    assert.ok(launched[3].args.includes('low'));
+  });
+});
+
+describe('usage summary and storage cleanup', () => {
+  test('aggregates recent usage across codex, claude, and agy', async () => {
+    const store = createTaskStore(home);
+    const registry = createDefaultRegistry({
+      codexRoot: fixture.codexRoot,
+      claudeRoot: fixture.claudeRoot,
+      agyRoot: fixture.agyRoot,
+      home,
+      deliverToCodex: async () => {},
+    });
+    const usage = createUsageTools({ registry, taskStore: store });
+
+    const single = await usage.getUsage({ source: 'agy', id: AGY_ID });
+    assert.equal(single.usage.inputTokens, 1400);
+    assert.equal(single.usage.model, 'gemini-4-neon-medium');
+
+    const codexSingle = await usage.getUsage({ source: 'codex', id: CODEX_ID });
+    assert.equal(codexSingle.usage.rateLimits.primary.used_percent, 12);
   });
 
-  test(`${provider}: unknown quota reset pauses without guessing or repeated retries`, async () => {
-    const task = await make({ provider });
-    let calls = 0;
-    const runner = createTaskRunner({ task, store, drivers: {
-      [provider]: async () => { calls += 1; return { status: 'failed', error: { message: 'Usage limit exceeded', codexErrorInfo: 'UsageLimitExceeded' } }; },
-    } });
-    runner.launch();
-    await runner.settled();
-    await runner.tick();
-    assert.equal(task.status, 'waiting_quota');
-    assert.equal(task.nextRetryAt, null);
-    assert.equal(calls, 1);
+  test('prunes expired tasks, old done messages, and stale empty mailbox directories', async () => {
+    const store = createTaskStore(home);
+    const oldTask = await store.create({
+      provider: 'claude',
+      cwd: workdir,
+      prompt: 'old task',
+      validProviders: ['claude', 'codex', 'agy'],
+    });
+    const oldDate = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
+    await store.write({ ...oldTask, updatedAt: oldDate });
+
+    const mailbox = createMailbox(home);
+    const staleAddr = { source: 'claude', id: CLAUDE_ID };
+    await mailbox.claimWaiter(staleAddr);
+    const oldTime = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    await fs.utimes(path.join(home, `claude-${CLAUDE_ID}`, 'waiter'), oldTime, oldTime);
+
+    const stats = await pruneStorage({ home, tasksDays: 14, doneMessagesDays: 7 });
+    assert.equal(stats.tasksRemoved, 1);
+    assert.equal(stats.mailboxesRemoved, 1);
   });
 
-  test(`${provider}: explicit fallback carries checkpoints to the other provider once`, async () => {
-    const other = provider === 'codex' ? 'claude' : 'codex';
-    const task = await make({ provider, fallback: other });
-    task.automode = { provider, expiresAt: Date.now() + 10000, kinds: ['command'] };
-    const runner = createTaskRunner({ task, store, drivers: {
-      [provider]: async (_, context) => {
-        await context.event({ type: 'text', text: '已完成第一步' });
-        return { status: 'failed', error: { message: 'usage_limit_reached' } };
-      },
-      [other]: async (current, context) => {
-        assert.match(context.prompt, /已完成第一步/);
-        assert.match(context.prompt, /不要直接重做/);
-        assert.equal(current.automode, null);
-        return { status: 'failed', error: { message: 'usage_limit_reached' } };
-      },
-    } });
-    runner.launch();
-    await runner.settled();
-    assert.equal(task.provider, other);
-    assert.equal(task.attempts, 2);
-    assert.equal(task.status, 'waiting_quota');
+  test('cli init registers both MCP server and hooks for agy into isolated config dir', async () => {
+    const geminiConfigDir = path.join(workdir, 'gemini-config');
+    const output = await runCli(['init', '--providers', 'agy', '--json'], {
+      home,
+      env: { ...process.env, GEMINI_CONFIG_DIR: geminiConfigDir },
+    });
+    const parsed = JSON.parse(output);
+    assert.equal(parsed.results.length, 1);
+    assert.equal(parsed.results[0].errors.length, 0);
+
+    const mcpConfig = JSON.parse(await fs.readFile(path.join(geminiConfigDir, 'mcp_config.json'), 'utf8'));
+    assert.equal(mcpConfig.mcpServers['session-bridge'].command, 'node');
+    assert.match(mcpConfig.mcpServers['session-bridge'].args[0], /src\/server\.js$/);
+
+    const hooksConfig = JSON.parse(await fs.readFile(path.join(geminiConfigDir, 'hooks.json'), 'utf8'));
+    assert.equal(hooksConfig['session-bridge'].enabled, true);
+    assert.ok(Array.isArray(hooksConfig['session-bridge'].PreInvocation));
   });
-}
 
-test('automode is scoped to provider, kinds and expiry; input and manual-only requests stay manual', () => {
-  const policy = { provider: 'codex', expiresAt: 200, kinds: ['command', 'input'] };
-  assert.equal(autoAllows(policy, { provider: 'codex', kind: 'command' }, 100), true);
-  for (const request of [{ provider: 'claude', kind: 'command' }, { provider: 'codex', kind: 'file' },
-    { provider: 'codex', kind: 'input' }, { provider: 'codex', kind: 'command', manualOnly: true }]) {
-    assert.equal(autoAllows(policy, request, 100), false);
-  }
-  assert.equal(autoAllows(policy, { provider: 'codex', kind: 'command' }, 200), false);
-});
+  test('agy hooks deliver unread messages synchronously on PreInvocation and Stop, and cli wait wakes on arrival', async () => {
+    const store = createTaskStore(home);
+    const mailbox = createMailbox(home);
+    const registry = createDefaultRegistry({
+      codexRoot: fixture.codexRoot,
+      claudeRoot: fixture.claudeRoot,
+      agyRoot: fixture.agyRoot,
+      home,
+      deliverToCodex: async () => {},
+    });
+    const messaging = createMessaging({ mailbox, registry });
 
-test('questions need structured answers, expired approvals deny, and cancellation invalidates them', async () => {
-  let time = 100;
-  const task = await make();
-  const approvals = createApprovals({ task, save: async () => {}, now: () => time });
-  const response = approvals.request({ kind: 'input', method: 'item/tool/requestUserInput', details: { questions: [{ id: 'q' }] } });
-  await until(() => task.approvals.length === 1);
-  const id = task.approvals[0].id;
-  await assert.rejects(approvals.resolve(id, 'approve'), /answer JSON/);
-  await assert.rejects(approvals.resolve(id, 'approve', {}), /answers/);
-  const answer = { answers: { q: { answers: ['yes'] } } };
-  await approvals.resolve(id, 'approve', answer);
-  assert.deepEqual(await response, { decision: 'approve', answer });
-  const second = approvals.request({ kind: 'command', details: {} });
-  time += 3600001;
-  await approvals.tick();
-  assert.equal((await second).decision, 'deny');
-  assert.equal(task.approvals[1].actor, 'expired');
-});
+    await mailbox.add({ from: { source: 'codex', id: CODEX_ID }, to: { source: 'agy', id: AGY_ID }, text: 'PreInvocation 測試訊息' });
+    const preOut = await runHook({
+      source: 'agy',
+      rawInput: { hookEventName: 'PreInvocation', conversationId: AGY_ID },
+      home,
+      registry,
+      mailbox,
+      taskStore: store,
+      messaging,
+    });
+    const preJson = JSON.parse(preOut.stdout);
+    assert.match(preJson.injectSteps[0].systemMessage.systemMessage, /PreInvocation 測試訊息/);
 
-test('bounded automatic retries respect reset time and stop after three retries', async () => {
-  let time = 100000;
-  const task = await make();
-  const runner = createTaskRunner({ task, store, now: () => time, drivers: {
-    codex: async () => ({ status: 'failed', error: { message: 'rate_limit' } }),
-  } });
-  runner.launch();
-  await runner.settled();
-  for (let i = 0; i < 3; i += 1) {
-    assert.ok(task.nextRetryAt > time);
-    await runner.tick();
-    assert.equal(task.attempts, i + 1);
-    time = task.nextRetryAt;
-    await runner.tick();
-    await runner.settled();
-  }
-  assert.equal(task.attempts, 4);
-  assert.equal(task.nextRetryAt, null);
-  assert.equal(task.status, 'waiting_quota');
-  assert.deepEqual(limitInfo({ codexErrorInfo: 'UsageLimitExceeded' }, {
-    rateLimits: { primary: { usedPercent: 100, resetsAt: 200 }, secondary: { usedPercent: 100, resetsAt: 300 } },
-  }, 100000), { resetAt: 300000, transient: false });
-});
+    await mailbox.add({ from: { source: 'claude', id: CLAUDE_ID }, to: { source: 'agy', id: AGY_ID }, text: 'Stop 續跑測試訊息' });
+    const stopOut = await runHook({
+      source: 'agy',
+      rawInput: { hookEventName: 'Stop', conversationId: AGY_ID },
+      home,
+      registry,
+      mailbox,
+      taskStore: store,
+      messaging,
+    });
+    const stopJson = JSON.parse(stopOut.stdout);
+    assert.equal(stopJson.decision, 'continue');
+    assert.match(stopJson.reason, /Stop 續跑測試訊息/);
 
-test('notification failure preserves successful result and can be inspected', async () => {
-  const task = await make();
-  const runner = createTaskRunner({ task, store, drivers: { codex: async () => ({ status: 'completed', output: 'done' }) },
-    notify: async () => { throw new Error('queue unavailable'); } });
-  runner.launch();
-  await runner.settled();
-  assert.equal(task.status, 'completed');
-  assert.equal(task.notificationError, 'queue unavailable');
-});
-
-test('commands get receipts and expired approval commands cannot turn on automode', async () => {
-  const task = await make();
-  const commandId = await store.submit(task.id, { action: 'auto', enabled: true });
-  const runner = createTaskRunner({ task, store, drivers: {}, now: () => Date.now() + 61000 });
-  await runner.tick();
-  assert.equal((await store.receipt(task.id, commandId)).ok, false);
-  assert.match((await store.receipt(task.id, commandId)).error, /過期/);
-  assert.deepEqual(await store.commands(task.id), []);
-});
-
-test('resume keeps the native session and rejects concurrent runs', async () => {
-  const task = await make();
-  let finish;
-  const runner = createTaskRunner({ task, store, drivers: { codex: async (current) => {
-    assert.equal(current.sessions.codex, 'existing');
-    await new Promise((resolve) => { finish = resolve; });
-    return { status: 'completed' };
-  } } });
-  task.sessions.codex = 'existing';
-  task.status = 'failed';
-  await runner.handle({ action: 'resume' });
-  await until(() => Boolean(finish));
-  await assert.rejects(runner.handle({ action: 'resume' }), /仍在執行/);
-  finish();
-  await runner.settled();
-});
-
-test('does not replay a control command interrupted after durable claim', async () => {
-  const task = await make();
-  const commandId = await store.submit(task.id, { action: 'resume' });
-  const [command] = await store.commands(task.id);
-  await store.beginCommand(task.id, command);
-  let ran = false;
-  const runner = createTaskRunner({ task, store, drivers: { codex: async () => { ran = true; return { status: 'completed' }; } } });
-  await runner.tick();
-  assert.equal(ran, false);
-  assert.equal((await store.receipt(task.id, commandId)).ok, false);
-  assert.match((await store.receipt(task.id, commandId)).error, /處理曾中斷/);
-});
-
-test('refuses resume while an orphaned agent PID is still alive', async () => {
-  const task = await make();
-  task.status = 'interrupted'; task.agentPid = process.pid;
-  const runner = createTaskRunner({ task, store, drivers: {} });
-  await assert.rejects(runner.handle({ action: 'resume' }), /先前 agent 行程/);
-  await assert.rejects(runner.handle({ action: 'cancel' }), /無法確認取消/);
-});
-
-test('failed process termination is not reported as successful cancellation', async () => {
-  const task = await make();
-  const runner = createTaskRunner({ task, store, drivers: { codex: async (_, context) => {
-    await new Promise((resolve) => context.signal.addEventListener('abort', resolve, { once: true }));
-    throw Object.assign(new Error('cannot stop process'), { code: 'STOP_FAILED' });
-  } } });
-  runner.launch();
-  await sleep(20);
-  await runner.handle({ action: 'cancel' });
-  await runner.settled();
-  assert.equal(task.status, 'recovery_required');
+    await mailbox.add({ from: { source: 'codex', id: CODEX_ID }, to: { source: 'agy', id: AGY_ID }, text: 'wait 喚醒測試' });
+    const waited = await runCli(['wait', 'agy', AGY_ID, '--timeout', '2', '--poll-ms', '50'], { home });
+    assert.match(waited, /wait 喚醒測試/);
+  });
 });

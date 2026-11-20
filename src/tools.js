@@ -1,7 +1,6 @@
-import { listClaudeSessions, readClaudeEntries } from './claude.js';
-import { listCodexSessions, readCodexEntries } from './codex.js';
 import { createMessaging } from './messaging.js';
-import { SESSION_ID, isWithin, oneLine, orElse, truncate } from './util.js';
+import { createDefaultRegistry } from './providers/registry.js';
+import { isWithin, oneLine, orElse, truncate } from './util.js';
 
 const DETAIL_MAX = 20000;
 const SNIPPET_RADIUS = 60;
@@ -15,7 +14,7 @@ const localTime = (iso) => {
 const sessionLabel = (session) => `${session.source} ${session.id}「${session.title}」`;
 
 const renderSession = (session) =>
-  `${session.source} ${session.id}  ${localTime(session.updatedAt)}  ${session.cwd}\n  ${session.title}`;
+  `${session.source} ${session.id}  ${localTime(session.updatedAt)}  ${session.cwd || '(未知 cwd)'}\n  ${session.title}`;
 
 const renderEntry = (entry, maxChars) =>
   `[${entry.index}] ${localTime(entry.timestamp)} ${entry.role}\n${truncate(entry.text, maxChars)}`;
@@ -37,22 +36,35 @@ const findHits = (session, entries, needle) =>
 
 /**
  * @param {{
- *   codexRoot: string,
- *   claudeRoot: string,
+ *   registry?: ReturnType<typeof createDefaultRegistry>,
+ *   codexRoot?: string,
+ *   claudeRoot?: string,
+ *   agyRoot?: string,
  *   defaultCwd: string,
  *   mailbox?: ReturnType<typeof import('./mailbox.js').createMailbox>,
  *   deliverToCodex?: (threadId: string, text: string) => Promise<void>,
- * }} config mailbox 與 deliverToCodex 只有訊息工具會用到
+ * }} config
  */
-export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, deliverToCodex }) => {
-  const sources = {
-    codex: { list: () => listCodexSessions(codexRoot), read: readCodexEntries },
-    claude: { list: () => listClaudeSessions(claudeRoot), read: readClaudeEntries },
-  };
+export const createTools = ({
+  registry,
+  codexRoot,
+  claudeRoot,
+  agyRoot,
+  defaultCwd,
+  mailbox,
+  deliverToCodex,
+}) => {
+  const providers = registry ?? createDefaultRegistry({
+    codexRoot,
+    claudeRoot,
+    agyRoot,
+    home: mailbox?.root,
+    deliverToCodex,
+  });
 
   const listInScope = async ({ source = 'all', cwd = defaultCwd, all = false }) => {
-    const names = source === 'all' ? Object.keys(sources) : [source];
-    const lists = await Promise.all(names.map((name) => sources[name].list()));
+    const targets = source === 'all' ? providers.all() : [providers.get(source)];
+    const lists = await Promise.all(targets.map((provider) => orElse(provider.listSessions, [])()));
     return lists
       .flat()
       .filter((session) => all || isWithin(session.cwd, cwd))
@@ -63,7 +75,10 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, delive
     all ? '' : `（範圍：${cwd}；傳入 all=true 可涵蓋所有專案）`;
 
   const findSession = async (source, id) => {
-    const sessions = SESSION_ID.test(id) && sources[source] ? await sources[source].list() : [];
+    if (!providers.isValidSessionId(source, id)) {
+      throw new Error(`找不到 ${source} session：${id}（請先用 list_sessions 取得 id）`);
+    }
+    const sessions = await providers.get(source).listSessions();
     const session = sessions.find((candidate) => candidate.id.toLowerCase() === id.toLowerCase());
     if (!session) throw new Error(`找不到 ${source} session：${id}（請先用 list_sessions 取得 id）`);
     return session;
@@ -79,7 +94,7 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, delive
 
   const readSession = async ({ source, id, offset, limit = 30, maxChars = 2000, roles }) => {
     const session = await findSession(source, id);
-    const recorded = await sources[source].read(session.file);
+    const recorded = await providers.get(source).readEntries(session.file);
     if (recorded.length === 0) return `${sessionLabel(session)}\n這個 session 沒有對話內容。`;
     const entries = roles ? recorded.filter((entry) => roles.includes(entry.role)) : recorded;
     const wanted = roles?.join('、');
@@ -90,13 +105,13 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, delive
     const page = entries.slice(start, start + limit);
     const earlier = start > 0 ? `；較早的內容請用 offset=${Math.max(0, start - limit)}` : '';
     const later = start + limit < entries.length ? `；較新的內容請用 offset=${start + limit}` : '';
-    const header = `${sessionLabel(session)} cwd=${session.cwd}\n共 ${recorded.length} 則${picked}，顯示 [${start}]–[${page.at(-1).index}]${earlier}${later}`;
+    const header = `${sessionLabel(session)} cwd=${session.cwd || '(未知)'}\n共 ${recorded.length} 則${picked}，顯示 [${start}]–[${page.at(-1).index}]${earlier}${later}`;
     return `${header}\n\n${page.map((entry) => renderEntry(entry, maxChars)).join('\n\n')}`;
   };
 
   const getEntry = async ({ source, id, index }) => {
     const session = await findSession(source, id);
-    const entries = await sources[source].read(session.file, { detailIndex: index });
+    const entries = await providers.get(source).readEntries(session.file, { detailIndex: index });
     if (entries.length === 0) throw new Error('這個 session 沒有對話內容。');
     const entry = entries[index];
     if (!entry) throw new Error(`index ${index} 超出範圍，可用範圍為 0–${entries.length - 1}`);
@@ -110,14 +125,14 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, delive
     let hits = [];
     for (const session of sessions) {
       if (hits.length >= limit) break;
-      const entries = await orElse(sources[session.source].read, [])(session.file);
+      const entries = await orElse(providers.get(session.source).readEntries, [])(session.file);
       hits = [...hits, ...findHits(session, entries, needle)];
     }
     if (hits.length === 0) return `沒有符合「${query}」的內容 ${scopeHint(scope)}`;
     return hits.slice(0, limit).join('\n');
   };
 
-  const messaging = createMessaging({ mailbox, deliverToCodex, findSession });
+  const messaging = createMessaging({ mailbox, registry: providers, findSession });
 
   const sendMessage = ({ from_source, from_id, to_source, to_id, text, expects_reply }) =>
     messaging.send({
@@ -127,9 +142,9 @@ export const createTools = ({ codexRoot, claudeRoot, defaultCwd, mailbox, delive
       expectsReply: expects_reply,
     });
 
-  const checkInbox = async ({ id }) => {
-    const session = await findSession('claude', id);
-    const messages = await messaging.takeNew({ source: 'claude', id: session.id });
+  const checkInbox = async ({ source = 'claude', id }) => {
+    const session = await findSession(source, id);
+    const messages = await messaging.takeNew({ source, id: session.id });
     return messages.length > 0 ? messages.join('\n\n---\n\n') : '沒有新訊息。';
   };
 

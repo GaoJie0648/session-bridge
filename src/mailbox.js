@@ -1,20 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
-import { SESSION_ID, parseJson } from './util.js';
+import { defaultHome } from './config.js';
+import { SAFE_SESSION_ID, parseJson } from './util.js';
 
-export const SOURCES = ['codex', 'claude'];
 export const STATES = ['new', 'active', 'done'];
-
+const PROVIDER_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const MESSAGE_ID = /^\d+-[0-9a-f]{8}$/;
 
-export const defaultMailboxRoot = () => process.env.SESSION_BRIDGE_HOME ?? path.join(os.homedir(), '.session-bridge');
+export const defaultMailboxRoot = defaultHome;
 
-// 位址會組成目錄名稱，必須先擋掉不是 session id 的輸入
+// 位址會組成目錄名稱，必須先擋掉不合法的 source 或 session id
 const boxName = ({ source, id }) => {
-  if (!SOURCES.includes(source) || !SESSION_ID.test(id)) throw new Error(`不是有效的 session 位址：${source} ${id}`);
+  if (!PROVIDER_NAME.test(String(source ?? '')) || !SAFE_SESSION_ID.test(String(id ?? ''))) {
+    throw new Error(`不是有效的 session 位址：${source} ${id}`);
+  }
   return `${source}-${id.toLowerCase()}`;
 };
 
@@ -34,7 +35,7 @@ const sentAtOf = (name) => Number(name.split('-')[0]);
  * 每個 session 一個信箱目錄，訊息依狀態放在 new / active / done 子目錄，以改名搬移確保只被取走一次
  * @param {string} root
  */
-export const createMailbox = (root) => {
+export const createMailbox = (root = defaultMailboxRoot()) => {
   const boxDir = (address) => path.join(root, boxName(address));
   const stateDir = (address, state) => path.join(boxDir(address), state);
   const waiterFile = (address) => path.join(boxDir(address), 'waiter');
@@ -48,14 +49,22 @@ export const createMailbox = (root) => {
     return contents.map(parseJson).filter(Boolean);
   };
 
-  const add = async ({ from, to, text, auto = false, expectsReply = !auto }, state = 'new') => {
+  const add = async ({ from, to, text, auto = false, expectsReply = !auto, fromCwd }, state = 'new') => {
     const now = Date.now();
     const id = `${now}-${randomUUID().slice(0, 8)}`;
-    const message = { id, from, to, text, auto, expectsReply, sentAt: new Date(now).toISOString() };
+    const message = {
+      id,
+      from,
+      to,
+      text,
+      auto,
+      expectsReply,
+      ...(fromCwd ? { fromCwd } : {}),
+      sentAt: new Date(now).toISOString(),
+    };
     const dir = stateDir(to, state);
     await fs.mkdir(dir, { recursive: true });
     const file = path.join(dir, fileName(message.id));
-    // 先寫暫存檔再改名，讀取端不會看到寫到一半的訊息
     await fs.writeFile(`${file}.tmp`, JSON.stringify(message));
     await fs.rename(`${file}.tmp`, file);
     return message;
@@ -86,5 +95,5 @@ export const createMailbox = (root) => {
 
   const waiterToken = (address) => fs.readFile(waiterFile(address), 'utf8').catch(ifMissing(''));
 
-  return { list, add, move, prune, claimWaiter, waiterToken };
+  return { root, list, add, move, prune, claimWaiter, waiterToken };
 };

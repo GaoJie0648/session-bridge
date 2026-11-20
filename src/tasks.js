@@ -1,67 +1,159 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { createTaskStore, alive } from './task-store.js';
 
-const worker = fileURLToPath(new URL('./task-worker.js', import.meta.url));
-export const wakeWorker = async (store, id) => {
-  const log = await fs.open(path.join(store.dir(id), 'worker.log'), 'a', 0o600);
-  try {
-    const child = spawn(process.execPath, [worker, id], {
-      detached: true, windowsHide: true, stdio: ['ignore', log.fd, log.fd],
-      cwd: path.dirname(worker), env: { ...process.env, SESSION_BRIDGE_HOME: store.root },
-    });
-    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-    child.unref();
-  } finally { await log.close(); }
+import { maybeAutoPrune } from './cleanup.js';
+import { TERMINAL_MODES, loadConfig, resolveProviderOptions } from './config.js';
+import { createDefaultRegistry } from './providers/registry.js';
+import { createTaskStore } from './task-store.js';
+import { launchInTerminal } from './terminal.js';
+
+/** 組合交辦給獨立終端 CLI 的初始 prompt（附上可驗證來源的查證指引） */
+export const buildTaskPrompt = (task, { isResume = false, extraPrompt } = {}) => {
+  const lines = [
+    `[session-bridge 任務 ${task.id}] 工作目錄：${task.cwd}`,
+  ];
+  if (task.from) {
+    lines.push(
+      `交辦來源：${task.from.source} ${task.from.id}。如需核對是否為使用者本人授權或確認原話，請直接呼叫 session-bridge 的 read_session(source="${task.from.source}", id="${task.from.id}", roles=["user"]) 查證後直接執行，無需再詢問使用者。`,
+    );
+  }
+  if (isResume) {
+    lines.push('這是接續先前的任務。請先確認既有檔案狀態與先前進度，再繼續完成剩餘部分。');
+    if (task.output) lines.push(`先前摘要：\n${task.output.slice(-4000)}`);
+    if (extraPrompt) lines.push(`後續指示：\n${extraPrompt}`);
+  } else {
+    lines.push(task.prompt);
+  }
+  return lines.join('\n\n');
 };
 
-export const taskView = (task) => ({ ...task,
-  workerAlive: alive(task.pid),
-  control: {
-    show: `session-bridge-control show ${task.id}`,
-    automode: `session-bridge-control auto ${task.id} on --minutes 60`,
-    manual: `session-bridge-control auto ${task.id} off`,
-    cancel: `session-bridge-control cancel ${task.id}`,
-  },
-});
+export const createTaskTools = ({
+  store = createTaskStore(),
+  registry = createDefaultRegistry({ home: store.root }),
+  launcher = launchInTerminal,
+  defaultCwd = process.cwd(),
+} = {}) => {
+  const launchTask = async (task, { prompt, resumeSessionId } = {}) => {
+    const config = await loadConfig(store.root);
+    const provider = registry.get(task.provider);
+    const mode = task.terminalMode ?? config.terminal.mode ?? 'tab';
+    const spec = provider.buildLaunchSpec({
+      cwd: task.cwd,
+      model: task.model,
+      effort: task.effort,
+      resumeSessionId,
+    });
+    const title = `bridge:${task.provider} ${task.id.slice(0, 8)}`;
+    const launched = await launcher({
+      taskDir: store.dir(task.id),
+      cwd: task.cwd,
+      title,
+      executable: spec.executable,
+      args: spec.args,
+      prompt,
+      promptFlag: spec.promptFlag,
+      env: {
+        SESSION_BRIDGE_HOME: store.root,
+        SESSION_BRIDGE_TASK_ID: task.id,
+        SESSION_BRIDGE_TASK_PROVIDER: task.provider,
+        ...(task.from ? {
+          SESSION_BRIDGE_FROM_SOURCE: task.from.source,
+          SESSION_BRIDGE_FROM_ID: task.from.id,
+        } : {}),
+      },
+      mode,
+      splitDirection: config.terminal.splitDirection ?? 'auto',
+    });
+    return store.update(task.id, { launcher: launched.launcher });
+  };
 
-export const createTaskTools = ({ store = createTaskStore(), wake = wakeWorker, defaultCwd = process.cwd() } = {}) => {
-  const start = async ({ provider, cwd = defaultCwd, prompt, from_source, from_id, auto_retry = true, fallback_provider }) => {
-    if (process.env.SESSION_BRIDGE_MANAGED === '1') throw new Error('背景任務不能再啟動背景任務；請回報原交辦者');
-    if (Boolean(from_source) !== Boolean(from_id)) throw new Error('from_source 與 from_id 必須一起提供');
-    const task = await store.create({ provider, cwd, prompt, from: from_id ? { source: from_source, id: from_id } : undefined,
-      autoRetry: auto_retry, fallback: fallback_provider });
-    try { await wake(store, task.id); } catch (error) {
-      task.status = 'failed'; task.error = { message: error.message }; await store.write(task); throw error;
+  const start = async ({
+    provider,
+    cwd = defaultCwd,
+    prompt,
+    model,
+    effort,
+    terminal_mode,
+    from_source,
+    from_id,
+  }) => {
+    if (Boolean(from_source) !== Boolean(from_id)) {
+      throw new Error('from_source 與 from_id 必須一起提供');
     }
-    return taskView(task);
-  };
-  const control = async (id, action) => {
-    const commandId = await store.submit(id, action);
-    await wake(store, id);
-    // Re-wake handles a command arriving just as an idle worker releases its lock.
-    for (let i = 0; i < 40; i += 1) {
-      const receipt = await store.receipt(id, commandId).catch((error) => {
-        if (error.code === 'ENOENT') return null;
-        throw error;
-      });
-      if (receipt && !receipt.processing) { if (!receipt.ok) throw new Error(receipt.error); return taskView(await store.read(id)); }
-      if (i === 12 || i === 24) await wake(store, id);
-      await sleep(250);
+    if (terminal_mode && !TERMINAL_MODES.includes(terminal_mode)) {
+      throw new Error(`無效的 terminal_mode：${terminal_mode}（可用：${TERMINAL_MODES.join('、')}）`);
     }
-    throw new Error(`控制指令尚未確認 (${commandId})；請用 show 檢查狀態與 worker.log，不要假定已執行。`);
+    const config = await loadConfig(store.root);
+    const resolved = resolveProviderOptions(config, provider, { model, effort });
+    const mode = terminal_mode ?? config.terminal.mode ?? 'tab';
+
+    const task = await store.create({
+      provider,
+      cwd,
+      prompt,
+      model: resolved.model,
+      effort: resolved.effort,
+      terminalMode: mode,
+      from: from_id ? { source: from_source, id: from_id } : undefined,
+      validProviders: registry.names,
+    });
+    const fullPrompt = buildTaskPrompt(task);
+    try {
+      const updated = await launchTask(task, { prompt: fullPrompt });
+      await maybeAutoPrune(store.root);
+      return updated;
+    } catch (error) {
+      await store.update(task.id, { status: 'failed', notificationError: error.message });
+      throw error;
+    }
   };
-  return {
-    start,
-    get: async ({ id }) => taskView(await store.read(id)),
-    list: async ({ cwd = defaultCwd, all = false } = {}) => (await store.list())
+
+  const resume = async ({ id, provider, prompt, model, effort, terminal_mode }) => {
+    const existing = await store.read(id);
+    const nextProvider = provider ?? existing.provider;
+    if (!registry.has(nextProvider)) {
+      throw new Error(`不支援的 provider：${nextProvider}（可用：${registry.names.join('、')}）`);
+    }
+    if (terminal_mode && !TERMINAL_MODES.includes(terminal_mode)) {
+      throw new Error(`無效的 terminal_mode：${terminal_mode}（可用：${TERMINAL_MODES.join('、')}）`);
+    }
+    const config = await loadConfig(store.root);
+    const resolved = resolveProviderOptions(config, nextProvider, {
+      model: model ?? (nextProvider === existing.provider ? existing.model : undefined),
+      effort: effort ?? (nextProvider === existing.provider ? existing.effort : undefined),
+    });
+    const resumeSessionId = existing.sessions?.[nextProvider];
+    const updated = await store.update(id, {
+      provider: nextProvider,
+      model: resolved.model ?? null,
+      effort: resolved.effort ?? null,
+      terminalMode: terminal_mode ?? existing.terminalMode ?? config.terminal.mode ?? 'tab',
+      status: 'launched',
+      reportedAt: null,
+      ...(prompt?.trim() ? { prompt: `${existing.prompt}\n\n後續指示：${prompt.slice(0, 32000)}` } : {}),
+    });
+    const nextPrompt = resumeSessionId
+      ? (prompt?.trim() || '請接續先前未完成的工作。')
+      : buildTaskPrompt(updated, { isResume: true, extraPrompt: prompt?.trim() });
+    return launchTask(updated, { prompt: nextPrompt, resumeSessionId });
+  };
+
+  const get = async ({ id }) => store.read(id);
+
+  const list = async ({ cwd = defaultCwd, all = false } = {}) =>
+    (await store.list())
       .filter((task) => all || path.resolve(task.cwd) === path.resolve(cwd))
-      .map(({ id, provider, status, createdAt, updatedAt, cwd, pid, nextRetryAt }) => ({ id, provider, status, createdAt, updatedAt, cwd, workerAlive: alive(pid), nextRetryAt })),
-    resume: ({ id, provider, prompt }) => control(id, { action: 'resume', provider, prompt }),
-    cancel: ({ id }) => control(id, { action: 'cancel' }),
-    control,
-  };
+      .map(({ id, provider, status, model, effort, createdAt, updatedAt, cwd: taskCwd, sessions, usage }) => ({
+        id,
+        provider,
+        status,
+        model,
+        effort,
+        sessions,
+        usage,
+        createdAt,
+        updatedAt,
+        cwd: taskCwd,
+      }));
+
+  return { start, resume, get, list };
 };

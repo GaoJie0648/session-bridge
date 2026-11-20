@@ -1,7 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
 import readline from 'node:readline';
 
-export const SESSION_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+export const UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+// 保留舊匯出名稱相容；新 provider 可在 adapter 中指定較寬鬆的 idPattern
+export const SESSION_ID = UUID_PATTERN;
+// 通用的安全 session id（允許 UUID 或英數、底線、連字號，禁止路徑穿越字元）
+export const SAFE_SESSION_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 
 /**
  * 進行中的 session 最後一行可能尚未寫完，無法解析的行回傳 null 而不拋錯
@@ -84,6 +91,52 @@ const normalizeDir = (dir) => dir.replaceAll('\\', '/').replace(/\/+$/, '').toLo
  * @param {string} parent
  */
 export const isWithin = (child, parent) => {
+  if (!child || !parent) return false;
   const [c, p] = [normalizeDir(child), normalizeDir(parent)];
   return c === p || c.startsWith(`${p}/`);
+};
+
+/** 原子寫入 JSON 檔案，避免讀取端看到寫到一半的內容 */
+export const atomicJson = async (file, value) => {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  await fsp.writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
+  await fsp.rename(temporary, file);
+};
+
+/** 讀取 JSON 檔案，不存在時回傳 fallback */
+export const readJsonOr = async (file, fallback = null) => {
+  try {
+    return JSON.parse(await fsp.readFile(file, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return fallback;
+    throw error;
+  }
+};
+
+const pathExists = (file) => {
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** 在 PATH 的絕對目錄中尋找第一個存在的可執行檔（相容 WindowsApps App Execution Alias） */
+export const findOnPath = (names, env = process.env, platform = process.platform) => {
+  const dirs = (env.Path ?? env.PATH ?? '').split(path.delimiter).filter((dir) => path.isAbsolute(dir));
+  const candidates = Array.isArray(names) ? names : [names];
+  const exts = platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  for (const dir of dirs) {
+    for (const name of candidates) {
+      const hasExt = path.extname(name) !== '';
+      const suffixList = hasExt ? [''] : exts;
+      for (const ext of suffixList) {
+        const full = path.join(dir, `${name}${ext}`);
+        if (pathExists(full)) return full;
+      }
+    }
+  }
+  return null;
 };
