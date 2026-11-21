@@ -7,7 +7,7 @@ import { SAFE_SESSION_ID, parseJson } from './util.js';
 
 export const STATES = ['new', 'active', 'done'];
 const PROVIDER_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
-const MESSAGE_ID = /^\d+-[0-9a-f]{8}$/;
+export const MESSAGE_ID =/^\d+-[0-9a-f]{8}$/;
 
 export const defaultMailboxRoot = defaultHome;
 
@@ -95,5 +95,16 @@ export const createMailbox = (root = defaultMailboxRoot()) => {
 
   const waiterToken = (address) => fs.readFile(waiterFile(address), 'utf8').catch(ifMissing(''));
 
-  return { root, list, add, move, prune, claimWaiter, waiterToken };
+  /** @returns {Promise<{ state: string, message: object } | null>} */
+  const find = async (address, messageId) => {
+    const name = fileName(messageId);
+    for (const state of STATES) {
+      const raw = await fs.readFile(path.join(stateDir(address, state), name), 'utf8').catch(ifMissing(null));
+      const message = raw && parseJson(raw);
+      if (message) return { state, message };
+    }
+    return null;
+  };
+
+  return { root, list, add, move, prune, find, claimWaiter, waiterToken };
 };

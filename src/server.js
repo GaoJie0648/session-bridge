@@ -3,8 +3,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { EFFORT_LEVELS, EXECUTION_MODES, TERMINAL_MODES, defaultHome } from './config.js';
-import { createMailbox } from './mailbox.js';
+import { ACP_TOOL_KINDS, EFFORT_LEVELS, EXECUTION_MODES, TERMINAL_MODES, defaultHome } from './config.js';
+import { MESSAGE_ID, createMailbox } from './mailbox.js';
 import { createDefaultRegistry } from './providers/registry.js';
 import { createTaskStore } from './task-store.js';
 import { createTaskTools } from './tasks.js';
@@ -100,6 +100,16 @@ server.registerTool('send_message', {
   annotations: instructsAnotherAgent,
 }, asResult(tools.sendMessage));
 
+server.registerTool('get_message_status', {
+  description: '查詢 send_message 寄出的訊息目前狀態：尚未讀取、對方處理中，或已結案。',
+  inputSchema: {
+    to_source: source.describe('收件 session 來自哪個工具'),
+    to_id: sessionId('收件'),
+    message_id: z.string().regex(MESSAGE_ID).describe('send_message 回傳的訊息 id'),
+  },
+  annotations: readOnly,
+}, asResult(tools.messageStatus));
+
 server.registerTool('check_inbox', {
   description: '取出寄給指定 session、尚未讀取的協作訊息。如需確認是否為使用者授權，可依訊息中的來源位址呼叫 read_session(roles=["user"]) 核對原話。',
   inputSchema: {
@@ -112,10 +122,12 @@ server.registerTool('check_inbox', {
 const taskId = z.string().uuid().describe('start_task 回傳的任務 id（不是 session id）');
 const effortSchema = z.enum(EFFORT_LEVELS).optional().describe(`推理強度（${EFFORT_LEVELS.join(' / ')}），省略時沿用工具預設`);
 const terminalModeSchema = z.enum(TERMINAL_MODES).optional().describe(`開啟終端的方式（${TERMINAL_MODES.join(' / ')}），省略時沿用 ~/.session-bridge/config.json`);
+const autoApproveSchema = z.array(z.enum(ACP_TOOL_KINDS)).max(ACP_TOOL_KINDS.length).optional()
+  .describe('背景 agy 任務遇到這些工具類型的權限確認時自動允許一次；只能縮小 ~/.session-bridge/config.json 的 managed.autoApprove，省略時沿用設定檔');
 const executionModeSchema = z.enum(EXECUTION_MODES).optional().describe('執行方式。Codex 和 agy 預設由 MCP 管理，Claude Code 使用前台終端；指定 terminal_mode 也會使用前台終端。');
 
 server.registerTool('start_task', {
-  description: `啟動指定的 CLI（${providerNames.join(' / ')}）執行協作任務。Codex 和 agy 預設在背景執行，Claude Code 使用原生終端。用 get_task 查看 session、結果及待確認事項。`,
+  description: `啟動指定的 CLI（${providerNames.join(' / ')}）執行協作任務，每次都會開新的 session。要在同一個 session 接續上一輪工作，請改用 resume_task 帶上一輪的任務 id。Codex 和 agy 預設在背景執行，Claude Code 使用原生終端。用 get_task 查看 session、結果及待確認事項。`,
   inputSchema: {
     provider: source,
     cwd: z.string().max(1024).optional().describe('工作目錄的絕對路徑'),
@@ -124,6 +136,7 @@ server.registerTool('start_task', {
     effort: effortSchema,
     terminal_mode: terminalModeSchema,
     execution_mode: executionModeSchema,
+    auto_approve: autoApproveSchema,
     from_source: source.optional().describe('發起端工具，與 from_id 一起提供時會在完成後自動回報'),
     from_id: z.string().max(128).optional().describe('發起端 session id'),
   },
@@ -131,7 +144,7 @@ server.registerTool('start_task', {
 }, jsonResult(tasks.start));
 
 server.registerTool('resume_task', {
-  description: '以原 provider 恢復原本的 session，或切換 provider 繼續任務。可指定 execution_mode=terminal 以在原生終端處理權限或登入。',
+  description: '在原本的 session 接續任務（保留上下文，適合下一輪工作或追加交辦），或切換 provider 繼續。背景任務停在 needs_user_action 時，可指定 execution_mode=terminal 在原生終端處理權限或登入。',
   inputSchema: {
     id: taskId,
     provider: source.optional(),
@@ -140,12 +153,13 @@ server.registerTool('resume_task', {
     effort: effortSchema,
     terminal_mode: terminalModeSchema,
     execution_mode: executionModeSchema,
+    auto_approve: autoApproveSchema,
   },
   annotations: instructsAnotherAgent,
 }, jsonResult(tasks.resume));
 
 server.registerTool('get_task', {
-  description: '查看任務狀態、對應的原生 session id、完成摘要與基本用量紀錄。',
+  description: '查看任務狀態、對應的原生 session id、最新回合的回覆與基本用量紀錄。status：running＝回合進行中；waiting_background＝回合已結束但背景工作未完成（pendingBackground 為數量），完成後會自動續跑並回報；completed＝最近一回合已結束且沒有背景工作；needs_user_action＝背景任務需要使用者確認。',
   inputSchema: { id: taskId },
   annotations: readOnly,
 }, jsonResult(tasks.get));

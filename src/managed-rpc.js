@@ -8,7 +8,7 @@ export const TURN_TIMEOUT = 30 * 60_000;
 
 export class UserActionRequired extends Error {}
 
-export const openManagedRpc = ({ executable, args, kind }, { cwd, env, spawnFn = spawn }) => {
+export const openManagedRpc = ({ executable, args, kind }, { cwd, env, spawnFn = spawn, approve = () => null }) => {
   const child = spawnFn(executable, args, { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const replies = new Map();
@@ -51,12 +51,17 @@ export const openManagedRpc = ({ executable, args, kind }, { cwd, env, spawnFn =
     if (!message) return;
     const { id, method, params, result, error } = message;
     if (method && id != null) {
+      const approvedOption = method === 'session/request_permission' ? approve(params) : null;
+      if (approvedOption) {
+        send({ id, result: { outcome: { outcome: 'selected', optionId: approvedOption } } });
+        return;
+      }
       const requiresUser = /requestApproval|requestUserInput|elicitation\/request|session\/request_permission/.test(method);
       const response = method === 'session/request_permission'
         ? { result: { outcome: { outcome: 'cancelled' } } }
         : { error: { code: requiresUser ? -32000 : -32601, message: 'Request requires an interactive client' } };
       send({ id, ...response });
-      if (requiresUser) fail(new UserActionRequired(`${method} 需要使用者確認，請在原生終端續接任務。`));
+      if (requiresUser) fail(new UserActionRequired(`${method} 需要使用者確認。`));
       return;
     }
     if (method) {

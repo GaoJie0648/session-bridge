@@ -239,7 +239,9 @@ export const createClaudeProvider = ({ root, env = process.env, platform = proce
     }
     if (event === 'Stop' && wakeMessages?.length) {
       // Claude Code 的 asyncRewake hook 以結束碼 2 喚醒模型，stderr 內容會交給它
-      return { stdout: '', stderr: wakeMessages.join('\n\n---\n\n'), exitCode: 2 };
+      // Claude Code 會把這段標成 Stop hook blocking error，第一行先講明來意
+      const notice = 'session-bridge 協作通知（不是錯誤）：以下是其他 session 送來的訊息。';
+      return { stdout: '', stderr: `${notice}\n\n${wakeMessages.join('\n\n---\n\n')}`, exitCode: 2 };
     }
     return { stdout: '', stderr: '', exitCode: 0 };
   },

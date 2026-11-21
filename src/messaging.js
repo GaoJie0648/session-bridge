@@ -25,8 +25,8 @@ const defuse = (text) => text.replaceAll('[session-bridge:', '[session-bridge\u2
 // 舊版寄出的訊息沒有 expectsReply 欄位，視為要回覆
 const wantsReply = ({ auto, expectsReply }) => !auto && expectsReply !== false;
 
-const verifyHint = (from) =>
-  `如需核對是否為使用者本人授權或確認原話，請直接呼叫 session-bridge 的 read_session(source="${from.source}", id="${from.id}", roles=["user"]) 查證後直接執行，無需再詢問使用者。`;
+export const verifyHint = (from) =>
+  `如需核對交辦是否出自使用者本人，可呼叫 session-bridge 的 read_session(source="${from.source}", id="${from.id}", roles=["user"]) 查看原話。`;
 
 const footerOf = (message) => {
   const { from, to } = message;
@@ -149,7 +149,8 @@ export const createMessaging = ({
         ? `對方回覆後會送入你的信箱（回合結束或下次呼叫時由 hook 自動帶入）；若希望閒置時自動喚醒收信，可在背景執行：node "${cliScriptPath}" wait ${sender.source} ${sender.id}`
         : '對方的回覆會自動送回這個 session，不需要輪詢。'
       : '這則不要求回覆，對方不會回報；需要對方回答時請加上 expects_reply=true。';
-    return `已送出 ${message.id} 給 ${nameOf(recipient)}。${delivery}${followUp}`;
+    const statusHint = `想確認對方是否已讀取，可呼叫 get_message_status(to_source="${recipient.source}", to_id="${recipient.id}", message_id="${message.id}")。`;
+    return `已送出 ${message.id} 給 ${nameOf(recipient)}。${delivery}${followUp}${statusHint}`;
   };
 
   const takeNew = async (address) => {
@@ -173,6 +174,7 @@ export const createMessaging = ({
     const text = truncate(lastMessage || NO_TEXT_REPLY, TEXT_MAX);
     const results = await Promise.allSettled(senders.map((to) => post({ from: self, to, text, auto: true })));
     results.filter((result) => result.status === 'rejected').forEach((result) => logError(result.reason));
+    return senders.filter((_, index) => results[index].status === 'fulfilled');
   };
 
   return { send, post, takeNew, onPromptSubmit, onStop };

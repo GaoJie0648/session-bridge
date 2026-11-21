@@ -112,6 +112,28 @@ export const readAgyUsage = async (file) => {
   return { model, inputTokens, outputTokens, cacheReadTokens, turns };
 };
 
+const BACKGROUND_STARTED = /running as a background task with task id: (\S+)/g;
+const BACKGROUND_ENDED = /Task id "([^"]+)" (?:finished|was canceled) with result/g;
+const BACKGROUND_RESET = /background tasks have been stopped due to server restart/;
+
+const applyBackgroundRecord = (pending, content) => {
+  if (BACKGROUND_RESET.test(content)) return new Set();
+  const started = [...content.matchAll(BACKGROUND_STARTED)].map((match) => match[1]);
+  const ended = new Set([...content.matchAll(BACKGROUND_ENDED)].map((match) => match[1]));
+  return new Set([...pending, ...started].filter((id) => !ended.has(id)));
+};
+
+/** 只看工具輸出與系統訊息，避免把模型引用的文字誤判為背景工作 */
+export const readAgyPendingBackground = async (file) => {
+  let pending = new Set();
+  const relevant = (line) => line.includes('background task') || line.includes('Task id');
+  for await (const record of streamJsonl(file, relevant)) {
+    if (record.type !== 'GENERIC' && record.type !== 'SYSTEM_MESSAGE') continue;
+    pending = applyBackgroundRecord(pending, String(record.content ?? ''));
+  }
+  return pending.size;
+};
+
 const metaFileFor = (home, id) => path.join(home, 'meta', `agy-${id.toLowerCase()}.json`);
 
 /** 記錄 Antigravity session 的 cwd（由 SessionStart hook 寫入，不更動 .gemini 內部檔案） */
@@ -193,6 +215,7 @@ export const createAgyProvider = ({
   listSessions: () => listAgySessions(root ?? defaultAgyRoot(env), home),
   readEntries: readAgyEntries,
   readUsage: readAgyUsage,
+  readPendingBackground: readAgyPendingBackground,
   buildManagedSpec: () => ({
     executable: resolveAgyCommand(env, platform), args: ['acp', '--stdio'], kind: 'acp',
   }),

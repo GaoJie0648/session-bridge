@@ -6,6 +6,8 @@ import { atomicJson, readJsonOr } from './util.js';
 export const TERMINAL_MODES = ['tab', 'split', 'window'];
 export const EXECUTION_MODES = ['managed', 'terminal'];
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// ACP ToolKind：背景 agy 任務可自動核准的工具類型
+export const ACP_TOOL_KINDS = ['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode', 'other'];
 
 export const defaultHome = () => process.env.SESSION_BRIDGE_HOME ?? path.join(os.homedir(), '.session-bridge');
 
@@ -23,7 +25,12 @@ export const DEFAULT_CONFIG = {
     tasksDays: 14,
     doneMessagesDays: 7,
   },
+  managed: {
+    autoApprove: [],
+  },
 };
+
+const validKinds = (value) => (Array.isArray(value) ? value.filter((kind) => ACP_TOOL_KINDS.includes(kind)) : []);
 
 const mergeConfig = (raw) => {
   const input = raw && typeof raw === 'object' ? raw : {};
@@ -41,6 +48,9 @@ const mergeConfig = (raw) => {
     retention: {
       ...DEFAULT_CONFIG.retention,
       ...(input.retention && typeof input.retention === 'object' ? input.retention : {}),
+    },
+    managed: {
+      autoApprove: validKinds(input.managed?.autoApprove),
     },
   };
 };
@@ -70,4 +80,10 @@ export const resolveProviderOptions = (config, provider, overrides = {}) => {
     model: typeof model === 'string' && model.trim() ? model.trim() : undefined,
     effort,
   };
+};
+
+/** 派工端只能在設定檔允許的範圍內縮小自動核准的工具類型 */
+export const resolveAutoApprove = (config, requested) => {
+  const allowed = config?.managed?.autoApprove ?? [];
+  return requested ? allowed.filter((kind) => requested.includes(kind)) : allowed;
 };

@@ -9,7 +9,7 @@
 - **背景執行與續接**：Codex 預設使用 App Server，agy 預設使用 ACP。Bridge 記錄原生 session ID、回合結果與可取得的用量，並回報發起端。
 - **原生終端與權限確認**：Claude Code 預設使用前台終端。Codex 和 agy 也可以指定 `execution_mode: "terminal"`，在 Windows Terminal 處理登入、權限確認與提問。
 - **可插拔 Provider Adapter**：內建 `claude`、`codex`、`agy`，所有 session 讀取、啟動參數、用量解析與 hook 皆由 `src/providers/` 統一抽象。
-- **可驗證來源的跨 Session 通訊**：訊息與交辦附上來源 session 定位，指示接收端若需確認授權直接呼叫 `read_session(roles=["user"])` 查證原話後執行，避免 Claude 過度防禦反問使用者。
+- **可驗證來源的跨 Session 通訊**：訊息與交辦附上來源 session 定位，接收端需要核對交辦是否出自使用者本人時，可呼叫 `read_session(roles=["user"])` 查看原話；是否據此執行由接收端依自身規則判斷。
 - **調整 `model` 與 `effort`**：支援在 `start_task` / `resume_task` 或 `~/.session-bridge/config.json` 指定原生模型名稱與推理強度（`low` / `medium` / `high` / `xhigh` / `max`）。
 - **輕量用量查詢與維運指令**：提供 `get_usage` 工具，以及 `init`、`doctor`、`tasks`、`show`、`usage`、`prune` CLI 指令與自動清理機制。
 
@@ -22,10 +22,11 @@
 | `get_entry` | 以 `[index]` 取得單一則完整內容（含工具輸入與輸出） |
 | `search_sessions` | 跨工具搜尋對話文字（不分大小寫，不含工具輸出） |
 | `send_message` | 傳訊息給另一個 session，並附上來源 session 查證指引 |
+| `get_message_status` | 查詢寄出的訊息是尚未讀取、對方處理中，或已結案 |
 | `check_inbox` | 取出指定 session 的未讀訊息 |
 | `start_task` | 啟動協作任務，支援 `model`、`effort`、`execution_mode`、`terminal_mode` 與完成自動回報 |
-| `resume_task` | 續接原生 session，或切換 provider 繼續任務 |
-| `get_task` / `list_tasks` | 查看任務狀態、對應原生 session id、完成摘要與用量 |
+| `resume_task` | 在原本的 session 接續任務（下一輪工作請用它，不要重開 `start_task`），或切換 provider 繼續 |
+| `get_task` / `list_tasks` | 查看任務狀態、對應原生 session id、最新回合的回覆與用量 |
 | `get_usage` | 查詢單一任務、單一 session，或近期各工具彙總的 token 用量與本機可得的 rate limit 快照 |
 
 ### 執行方式與狀態
@@ -33,7 +34,8 @@
 - `execution_mode: "managed"` 需要支援 stdio App Server 的 Codex CLI，或支援 ACP v1 的 agy。agy 續接前會檢查 `loadSession` 能力。背景執行時，`get_task` 會顯示原生 session ID 和結果。
 - `execution_mode: "terminal"` 或明確指定 `terminal_mode` 會開啟原生終端。續接預設沿用上一次的執行方式，也可以切換。
 - Claude Code 請傳入專案的絕對 `cwd`。若任務顯示 `waiting_for_workspace_trust`，請在 Claude Code 終端確認專案。從家目錄啟動的信任確認只維持該次 session。
-- 若背景任務回傳 `needs_user_action`，可指定 `execution_mode: "terminal"` 續接，由使用者在原生介面處理登入或權限。`failed` 的 `error` 欄位會顯示啟動或回合錯誤。
+- 若背景任務回傳 `needs_user_action`，可用 `resume_task(id, execution_mode: "terminal")` 在原生終端接續同一個 session，由使用者處理登入或權限；或用 `managed.autoApprove` 讓背景 agy 自動允許指定類型的工具。`failed` 的 `error` 欄位會顯示啟動或回合錯誤。
+- 前台任務會追蹤整個 session，不只第一回合：新回合開始時狀態回到 `running`，每回合結束都會更新 `output`。agy 把工作放到背景執行而先結束回合時，狀態是 `waiting_background`（`pendingBackground` 為未完成數量），中途回覆不轉寄；背景工作全部完成的那一回合結束時，才標記 `completed` 並把最後回覆送回發起端。注意：背景工作如果是 dev server 這類不會結束的程序，任務會一直停在 `waiting_background`，請用 `get_task` 查看進度。
 - `send_message` 可把訊息排入 agy 信箱。對閒置的 agy 任務，可用背景 `resume_task` 續接原對話並取信。
 
 ## 安裝與初始化
@@ -86,12 +88,16 @@ node src/cli.js prune
   "retention": {
     "tasksDays": 14,
     "doneMessagesDays": 7
+  },
+  "managed": {
+    "autoApprove": []
   }
 }
 ```
 
 - `terminal.mode`：`tab`（預設，新分頁）、`split`（分割視窗）、`window`（獨立新視窗）。
 - `defaults.<provider>`：設定各工具預設 `model` 與 `effort`，派工時未傳入即套用。
+- `managed.autoApprove`：背景 agy 任務可自動允許一次的 ACP 工具類型（`read`、`edit`、`delete`、`move`、`search`、`execute`、`think`、`fetch`、`switch_mode`、`other`）。預設為空，代表一律交給使用者確認。`start_task` / `resume_task` 的 `auto_approve` 只能在這個範圍內縮小。加入 `execute` 等同允許背景 agent 不經確認就執行指令，請謹慎設定。
 
 ## 資料來源
 

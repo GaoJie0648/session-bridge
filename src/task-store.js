@@ -35,6 +35,7 @@ export const createTaskStore = (root = defaultHome()) => {
     effort,
     terminalMode,
     executionMode,
+    autoApprove = [],
     from,
     validProviders,
   }) => {
@@ -60,6 +61,7 @@ export const createTaskStore = (root = defaultHome()) => {
       effort: effort ?? null,
       terminalMode: terminalMode ?? 'tab',
       ...(executionMode ? { executionMode } : {}),
+      autoApprove,
       from: from ?? null,
       status: 'launched',
       sessions: {},

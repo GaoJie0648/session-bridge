@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
 import { maybeAutoPrune } from './cleanup.js';
-import { EXECUTION_MODES, TERMINAL_MODES, loadConfig, resolveProviderOptions } from './config.js';
+import { EXECUTION_MODES, TERMINAL_MODES, loadConfig, resolveAutoApprove, resolveProviderOptions } from './config.js';
 import { isActive, launchManaged, managedWorkerExited } from './managed-task.js';
+import { verifyHint } from './messaging.js';
 import { createDefaultRegistry } from './providers/registry.js';
 import { createTaskStore } from './task-store.js';
 import { launchInTerminal } from './terminal.js';
@@ -14,9 +15,7 @@ export const buildTaskPrompt = (task, { isResume = false, extraPrompt } = {}) =>
     `[session-bridge 任務 ${task.id}] 工作目錄：${task.cwd}`,
   ];
   if (task.from) {
-    lines.push(
-      `交辦來源：${task.from.source} ${task.from.id}。如需核對是否為使用者本人授權或確認原話，請直接呼叫 session-bridge 的 read_session(source="${task.from.source}", id="${task.from.id}", roles=["user"]) 查證後直接執行，無需再詢問使用者。`,
-    );
+    lines.push(`交辦來源：${task.from.source} ${task.from.id}。${verifyHint(task.from)}`);
   }
   if (isResume) {
     lines.push('這是接續先前的任務。請先確認既有檔案狀態與先前進度，再繼續完成剩餘部分。');
@@ -106,6 +105,7 @@ export const createTaskTools = ({
     effort,
     terminal_mode,
     execution_mode,
+    auto_approve,
     from_source,
     from_id,
   }) => {
@@ -125,6 +125,7 @@ export const createTaskTools = ({
       effort: resolved.effort,
       terminalMode: mode,
       executionMode,
+      autoApprove: resolveAutoApprove(config, auto_approve),
       from: from_id ? { source: from_source, id: from_id } : undefined,
       validProviders: registry.names,
     });
@@ -139,7 +140,7 @@ export const createTaskTools = ({
     }
   };
 
-  const resume = async ({ id, provider, prompt, model, effort, terminal_mode, execution_mode }) => store.withLaunchLock(id, async () => {
+  const resume = async ({ id, provider, prompt, model, effort, terminal_mode, execution_mode, auto_approve }) => store.withLaunchLock(id, async () => {
     const existing = currentTaskState(await store.read(id));
     if (existing.executionMode === 'managed' && isActive(existing)) throw new Error('背景任務正在執行，完成後才能續接。');
     const nextProvider = provider ?? existing.provider;
@@ -160,7 +161,9 @@ export const createTaskTools = ({
       effort: resolved.effort ?? null,
       terminalMode: terminal_mode ?? existing.terminalMode ?? config.terminal.mode ?? 'tab',
       executionMode,
+      autoApprove: resolveAutoApprove(config, auto_approve ?? existing.autoApprove),
       status: 'launched',
+      pendingBackground: 0,
       reportedAt: null,
       runId: null,
       managedPid: null,

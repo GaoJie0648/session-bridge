@@ -16,6 +16,16 @@ const serverFile = fileURLToPath(new URL('./server.js', import.meta.url));
 const requestFile = (store, id) => path.join(store.dir(id), 'managed-launch.json');
 export const isActive = (task) => ['launched', 'running'].includes(task.status);
 
+/** 只核准設定允許的工具類型，且只選 allow_once，不替使用者永久放行 */
+export const permissionApprover = (kinds) => (params) => {
+  if (!kinds?.length) return null;
+  if (!kinds.includes(params?.toolCall?.kind ?? 'other')) return null;
+  const options = Array.isArray(params?.options) ? params.options : [];
+  return options.find((option) => option?.kind === 'allow_once')?.optionId ?? null;
+};
+
+const resumeHint = (id) => `可呼叫 resume_task(id="${id}", execution_mode="terminal") 在原生終端接續同一個 session 並手動確認；或在 ~/.session-bridge/config.json 的 managed.autoApprove 設定可自動核准的工具類型。`;
+
 export const launchManaged = async ({ store, task, prompt, resumeSessionId, spawnFn = spawn }) => {
   await atomicJson(requestFile(store, task.id), { runId: task.runId, prompt, resumeSessionId });
   const child = spawnFn(process.execPath, [workerFile, task.id, task.runId], {
@@ -69,7 +79,7 @@ export const runManagedTask = async ({
   try {
     const spec = provider.buildManagedSpec();
     const runTurn = spec.kind === 'acp' ? runAgyTurn : runCodexTurn;
-    rpc = connect(spec, { cwd: task.cwd, env: providerEnv });
+    rpc = connect(spec, { cwd: task.cwd, env: providerEnv, approve: permissionApprover(task.autoApprove) });
     result = await runTurn(rpc, {
       task,
       resumeSessionId: request.resumeSessionId,
@@ -90,9 +100,12 @@ export const runManagedTask = async ({
       },
     });
   } catch (error) {
+    const needsUser = error instanceof UserActionRequired;
     failure = {
-      status: error instanceof UserActionRequired ? 'needs_user_action' : 'failed',
-      error: truncate(error.message, 1000),
+      status: needsUser ? 'needs_user_action' : 'failed',
+      error: needsUser
+        ? `${truncate(error.message, 1000)}\n${resumeHint(id)}`
+        : truncate(error.message, 1000),
     };
   } finally {
     rpc?.close();

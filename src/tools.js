@@ -5,6 +5,11 @@ import { isWithin, oneLine, orElse, truncate } from './util.js';
 const DETAIL_MAX = 20000;
 const SNIPPET_RADIUS = 60;
 const HITS_PER_SESSION = 3;
+const MESSAGE_STATES = {
+  new: '已送達信箱，對方尚未讀取。',
+  active: '對方已讀取，處理中；回合結束（或背景工作全部完成）時，最後回覆會自動轉寄給你。',
+  done: '已結案：對方已回覆，或這是不需回覆的通知。',
+};
 
 const localTime = (iso) => {
   const date = new Date(iso);
@@ -148,5 +153,13 @@ export const createTools = ({
     return messages.length > 0 ? messages.join('\n\n---\n\n') : '沒有新訊息。';
   };
 
-  return { listSessions, readSession, getEntry, searchSessions, sendMessage, checkInbox };
+  const messageStatus = async ({ to_source, to_id, message_id }) => {
+    const session = await findSession(to_source, to_id);
+    const found = await mailbox.find({ source: to_source, id: session.id }, message_id);
+    if (!found) throw new Error(`找不到訊息 ${message_id}（可能寄錯收件 session，或已結案超過保留期限而被清除）`);
+    const meaning = MESSAGE_STATES[found.state];
+    return `訊息 ${message_id}（寄出於 ${localTime(found.message.sentAt)}）：${meaning}`;
+  };
+
+  return { listSessions, readSession, getEntry, searchSessions, sendMessage, checkInbox, messageStatus };
 };
