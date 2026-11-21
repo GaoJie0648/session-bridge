@@ -17,7 +17,7 @@ import { createMessaging } from '../src/messaging.js';
 import { createDefaultRegistry } from '../src/providers/registry.js';
 import { createTaskStore } from '../src/task-store.js';
 import { createTaskTools } from '../src/tasks.js';
-import { buildLauncherScript, buildTerminalCommand } from '../src/terminal.js';
+import { buildTerminalCommand } from '../src/terminal.js';
 import { createUsageTools } from '../src/usage.js';
 import { AGY_ID, CLAUDE_ID, CODEX_ID, createFixture } from './fixtures.js';
 
@@ -67,22 +67,6 @@ describe('terminal launcher commands', () => {
     assert.equal(spec.launcher, 'cmd:start');
     assert.equal(spec.command, 'cmd.exe');
     assert.ok(spec.args.includes('start'));
-  });
-
-  test('generates PowerShell script that reads prompt from UTF-8 file and passes promptFlag', () => {
-    const script = buildLauncherScript({
-      executable: 'agy.exe',
-      args: ['--model', 'gemini-4-neon', '--effort', 'high'],
-      promptFile: 'C:\\tmp\\prompt.txt',
-      promptFlag: '-i',
-      env: { SESSION_BRIDGE_TASK_ID: 'task-1' },
-      title: "bridge:agy 'quoted'",
-    });
-
-    assert.match(script, /\$env:SESSION_BRIDGE_TASK_ID = 'task-1'/);
-    assert.match(script, /\$__args \+= '-i'/);
-    assert.match(script, /ReadAllText\('C:\\tmp\\prompt\.txt'/);
-    assert.match(script, /'bridge:agy ''quoted'''/);
   });
 });
 

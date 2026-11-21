@@ -10,11 +10,28 @@ import { findOnPath } from './util.js';
 // PowerShell 單引號字串轉義：將單引號加倍即可安全包覆任意文字
 const psQuote = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
+// 依 Windows argv 解析規則（CommandLineToArgvW / MSVC CRT）包覆單一參數
+const windowsArg = (arg) => `"${String(arg).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+
+export const toWindowsCommandLine = (args) => args.map(windowsArg).join(' ');
+
+// CreateProcess 的命令列上限（含執行檔路徑）
+const MAX_COMMAND_LINE = 32767;
+
+const assertLaunchable = (executable, commandLine) => {
+  if (/\.(cmd|bat)$/i.test(executable)) {
+    throw new Error(`無法以 ${path.basename(executable)} 啟動：.cmd／.bat 會經由 cmd.exe 重新解析參數，prompt 中的引號與 & 可能被當成指令。請改用 SESSION_BRIDGE_CLAUDE、SESSION_BRIDGE_CODEX 或 SESSION_BRIDGE_AGY 指定 .exe 路徑。`);
+  }
+  if (windowsArg(executable).length + 1 + commandLine.length > MAX_COMMAND_LINE) {
+    throw new Error(`交辦內容太長，超過 Windows 命令列上限（${MAX_COMMAND_LINE} 字元）；請縮短 prompt，或把細節寫進檔案再請對方讀取。`);
+  }
+};
+
 /**
- * 產生暫存啟動腳本，由檔案讀入 prompt 再以原生參數啟動目標 CLI，
- * 避免 Windows 命令列長度上限與多層引號跳脫問題，並在 CLI 結束後保留終端互動。
+ * 產生暫存啟動腳本，以預先跳脫好的命令列直接啟動目標 CLI，並在 CLI 結束後保留終端互動。
+ * 不用 `& exe @args`：Windows PowerShell 5.1 不會跳脫參數內的雙引號，prompt 會被切成多個參數。
  */
-export const buildLauncherScript = ({ executable, args, promptFile, promptFlag, env = {}, title }) => {
+export const buildLauncherScript = ({ executable, argsFile, env = {}, title }) => {
   const lines = [
     '$ErrorActionPreference = "Continue"',
     '[Console]::InputEncoding = [System.Text.Encoding]::UTF8',
@@ -25,13 +42,13 @@ export const buildLauncherScript = ({ executable, args, promptFile, promptFlag, 
     if (value === undefined || value === null) continue;
     lines.push(`$env:${key} = ${psQuote(value)}`);
   }
-  lines.push(`$__args = @(${args.map(psQuote).join(', ')})`);
-  if (promptFile) {
-    lines.push(`$__prompt = [System.IO.File]::ReadAllText(${psQuote(promptFile)}, [System.Text.Encoding]::UTF8)`);
-    if (promptFlag) lines.push(`$__args += ${psQuote(promptFlag)}`);
-    lines.push('$__args += $__prompt');
-  }
-  lines.push(`& ${psQuote(executable)} @__args`);
+  lines.push(
+    `$__psi = [System.Diagnostics.ProcessStartInfo]::new(${psQuote(executable)})`,
+    `$__psi.Arguments = [System.IO.File]::ReadAllText(${psQuote(argsFile)}, [System.Text.Encoding]::UTF8)`,
+    '$__psi.UseShellExecute = $false',
+    '$__psi.WorkingDirectory = (Get-Location).ProviderPath',
+    '[System.Diagnostics.Process]::Start($__psi).WaitForExit()',
+  );
   return `${lines.join('\r\n')}\r\n`;
 };
 
@@ -127,14 +144,18 @@ export const launchInTerminal = async ({
   shellPath,
   platform = process.platform,
 }) => {
+  const hasPrompt = typeof prompt === 'string' && prompt.length > 0;
+  const promptArgs = hasPrompt ? [...(promptFlag ? [promptFlag] : []), prompt] : [];
+  const commandLine = toWindowsCommandLine([...args, ...promptArgs]);
+  assertLaunchable(executable, commandLine);
   await fs.mkdir(taskDir, { recursive: true });
-  let promptFile;
-  if (typeof prompt === 'string' && prompt.length > 0) {
-    promptFile = path.join(taskDir, 'prompt.txt');
-    await fs.writeFile(promptFile, prompt, 'utf8');
-  }
+  // prompt.txt 只留作紀錄與除錯，實際傳入的是 args.txt
+  const promptFile = hasPrompt ? path.join(taskDir, 'prompt.txt') : null;
+  if (hasPrompt) await fs.writeFile(promptFile, prompt, 'utf8');
+  const argsFile = path.join(taskDir, 'args.txt');
+  await fs.writeFile(argsFile, commandLine, 'utf8');
   const scriptPath = path.join(taskDir, 'launch.ps1');
-  const script = buildLauncherScript({ executable, args, promptFile, promptFlag, env, title });
+  const script = buildLauncherScript({ executable, argsFile, env, title });
   await fs.writeFile(scriptPath, `\uFEFF${script}`, 'utf8');
 
   const spec = buildTerminalCommand({ scriptPath, cwd, title, mode, splitDirection, wtPath, shellPath, platform });
@@ -153,6 +174,6 @@ export const launchInTerminal = async ({
     launcher: spec.launcher,
     pid: child.pid ?? null,
     scriptPath,
-    promptFile: promptFile ?? null,
+    promptFile,
   };
 };
